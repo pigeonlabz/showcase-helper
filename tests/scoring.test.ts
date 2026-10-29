@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateScore } from "../src/scoring";
-import { findSpecies } from "../src/species";
+import { findSpecies, SPECIES } from "../src/species";
 
 describe("single-species Biggest Showcase scoring", () => {
   it("matches the published Squirtle worked example", () => {
@@ -37,6 +37,40 @@ describe("single-species Biggest Showcase scoring", () => {
     }, machop);
     expect(score.exact).not.toBeNull();
     expect(score.parts?.xxl).toBeCloseTo(178.04878, 4);
+  });
+
+  it("preserves verified fixture scores and matches the independent calculator", () => {
+    const cases = [
+      { species: "Bulbasaur", heightM: 1.18, weightKg: 11.55, ivs: [10, 7, 8] as const, expected: 1088.0330060620927 },
+      { species: "Machop", heightM: 1.33, weightKg: 36.06, ivs: [15, 6, 14] as const, expected: 1100.219720658745 },
+      { species: "Staryu", heightM: 1.32, weightKg: 56.36, ivs: [12, 15, 12] as const, expected: 1084.5760406672389 },
+    ];
+
+    for (const sample of cases) {
+      const species = findSpecies(sample.species);
+      expect(species, sample.species).toBeDefined();
+      const score = calculateScore({
+        heightM: sample.heightM,
+        weightKg: sample.weightKg,
+        ivs: { attack: sample.ivs[0], defense: sample.ivs[1], hp: sample.ivs[2] },
+        xxl: true,
+      }, species);
+      expect(score.exact, sample.species).toBeCloseTo(sample.expected, 7);
+    }
+  });
+
+  it("loads verified form rows but excludes incomplete and custom-band size profiles", () => {
+    expect(SPECIES.length).toBeGreaterThan(1_000);
+    expect(findSpecies("Galarian Articuno")).toMatchObject({ dex: 144, maxHeightClass: 1.75 });
+    expect(findSpecies("Pumpkaboo")).toBeUndefined();
+    expect(findSpecies("Gourgeist (Super)")).toBeUndefined();
+    expect(findSpecies("Dragonite Mega")).toBeUndefined();
+    expect(calculateScore({
+      heightM: 0.6,
+      weightKg: 8,
+      ivs: { attack: 15, defense: 15, hp: 15 },
+      xxl: true,
+    }, findSpecies("Pumpkaboo")).supported).toBe(false);
   });
 
   it("changes the estimate immediately when an IV is manually corrected", () => {

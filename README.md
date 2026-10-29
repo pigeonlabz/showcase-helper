@@ -21,7 +21,7 @@ npm run build
 npm run preview
 ```
 
-The fixture folder contains the four provided Machop and Bulbasaur screenshots. OCR tests run Tesseract against each image; IV tests decode the appraisal images to pixels and count the three five-point meter sections. Expected IV values are not read from app metadata or embedded in the application. The non-appraisal images are also checked to ensure no IV values are invented. The first test run downloads Tesseract's worker data if it is not already cached.
+The fixture folder contains Machop and Bulbasaur screenshots with and without appraisal, plus the Staryu appraisal regression screenshot. OCR tests run Tesseract against each image; IV tests decode the appraisal images to pixels and count the three five-point meter sections. Expected IV values are not read from app metadata or embedded in the application. The non-appraisal images are also checked to ensure no IV values are invented. The first test run downloads Tesseract's worker data if it is not already cached.
 
 ## GitHub Pages deployment
 
@@ -35,7 +35,9 @@ For a manual deployment, run `npm run build` and publish the contents of `dist/`
 
 ## Supported data and score model
 
-Initial species-specific size data is included for Bulbasaur (0.70 m, 6.9 kg, 1.75× XXL height class) and Machop (0.80 m, 19.5 kg, 1.75× class). Species without an explicit data row remain unsupported for scoring; no generic multiplier is substituted. Other Showcase formats are unsupported.
+The bundled `src/data/species-sizes.json` contains 1,109 verified Pokémon and form profiles. Each row has its own mean height, mean weight, weight standard deviation and XXL height class. Bulbasaur and Machop retain their original constants; Staryu is also covered. Form-specific names can be entered in the species field, including regional and other forms present in the dataset.
+
+Profiles are included only when the source marks them `verified` and every scoring constant is numeric. This snapshot excludes 21 unverified rows and 53 rows missing a required constant. For example, Pumpkaboo and Gourgeist use a custom four-size system rather than ordinary XXL classes, and remain unsupported. Some temporary forms have no Game Master weight deviation; their base form's deviation is not reused. Unsupported species or forms continue to show **Scoring unavailable**, with extracted measurements retained. No generic multiplier is substituted. Other Showcase formats are unsupported.
 
 The community-reverse-engineered standard Biggest formula is:
 
@@ -48,14 +50,45 @@ XXL bonus     = (150 × 1.75 / 2.05) + 50 when XXL, otherwise 0
 
 CP is not used. The on-screen height and weight are rounded, so the app labels scores as estimates and shows a small input-rounding range. When IVs or XXL status are unknown, it widens the range instead of assuming values. A nickname can be copied once all three IVs and XXL status are known.
 
-The score model is community research, not an official Niantic specification. A published Squirtle worked example is used as an independent regression check. The weight denominator uses the per-species Game Master weight deviation; for the two included species it is base weight / 8. Some XL measurements can exceed 150 weight points under the raw community formula, so the app retains the formula's result instead of silently clamping it.
+The score model is community research, not an official Niantic specification. The exact-input results below were checked against the independent [PGO-XXL-DB Showcase calculator](https://pgoxxldb.com/en/size-calculator/?pokemon=no0120) using its current public calculator core and size data. The calculator's public source values and our local table agree for these cases.
+
+| Pokémon | Height | Weight | IVs | XXL | Point-input score |
+| --- | ---: | ---: | --- | --- | ---: |
+| Bulbasaur | 1.18 m | 11.55 kg | 10/7/8 | Yes | 1088.033006 |
+| Machop | 1.33 m | 36.06 kg | 15/6/14 | Yes | 1100.219721 |
+| Staryu | 1.32 m | 56.36 kg | 12/15/12 | Yes | 1084.576041 |
+
+These are unrounded point-input calculations. The independent calculator also reports rounded measurement intervals; in-game scores can differ because Pokémon GO displays rounded measurements. Some XL measurements can exceed 150 weight points under the raw community formula, so the app retains the formula's result instead of silently clamping it.
+
+As a second check, applying the independent [Pokémon GO Coordinates calculator's published client formula](https://pokemongocoordinates.com/showcase/) to the same inputs yields integer totals of 1088, 1100 and 1085. Its formula uses `mean weight × (XXL class + 0.5)`; these species have a Game Master weight deviation of exactly `mean weight / 8`, making that denominator equivalent to the one used here. Its flat bonus is 178 points rather than 178.04878, which does not change these rounded totals.
+
+### Size data source and regeneration
+
+The checked-in table was generated from the verified rows of Brandon Enright's [`pogo_size` Game Master extractor](https://github.com/bmenrigh/pogo_size/tree/395bee67c5bb0e774e137f25acf7a19946e2c388). Source revision: `395bee67c5bb0e774e137f25acf7a19946e2c388`; source table SHA-256: `8a14b5286de87acd0b4f4e64c32215d63ed5da437c0f6beecf2dfccd31a9fea3`. The [parser](https://github.com/bmenrigh/pogo_size/blob/395bee67c5bb0e774e137f25acf7a19946e2c388/read_pokemon_stats_from_gm.py) reads mean height, mean weight, `weightStdDev`, and extended Pokémon size settings from a complete decoded Game Master; its [documentation](https://github.com/bmenrigh/pogo_size/blob/395bee67c5bb0e774e137f25acf7a19946e2c388/readme.md) describes its validation and special-form handling. Pokémon GO Game Master snapshots are maintained by [PokeMiners](https://github.com/PokeMiners/game_masters). The upstream extractor does not embed a reliable original Game Master snapshot date, so the source commit and table hash identify this data snapshot, but not the exact game version it came from.
+
+To refresh the table:
+
+1. Check out or download a reviewed `pogo_size` revision and obtain a complete decoded `GAME_MASTER.json` from a trusted Game Master source.
+2. From that checkout, extract the TSV and review any validation warnings:
+
+   ```sh
+   python read_pokemon_stats_from_gm.py GAME_MASTER.json > pokemon_stats.tsv
+   ```
+
+3. From this project, pass the TSV path and the extractor repository's full commit SHA:
+
+   ```sh
+   npm run generate:species -- ../pogo_size/pokemon_stats.tsv 395bee67c5bb0e774e137f25acf7a19946e2c388
+   ```
+
+The generator bundles only rows marked `verified` with finite mean, deviation and one of the supported 1.55, 1.75 or 2.00 XXL height classes. It records the source revision and input checksum in the JSON. It intentionally does not apply guessed constants to unverified forms or rows with missing deviations. Review the upstream validation rules when Game Master fields or size classes change.
 
 ## OCR limitations
 
 - OCR depends on a legible screenshot, supported image decoding in the browser, and downloading Tesseract's English model on first use. Internet access is needed for that first model load unless the browser has cached it.
 - Appraisal IV detection uses the colored pixel runs and neutral remainder of the three visible bars. It can miss bars obscured by overlays, compressed too heavily, or shown in a substantially different layout; review the values when flagged.
 - Species text is taken from the OCR text when recognized. Nicknames can differ from species names, so the editable species field is the fallback.
-- This MVP includes only two species' score constants. OCR can read other species, but their scores are marked unsupported until verified size data is added.
+- OCR can recognize species beyond this scoring dataset. A profile absent from the verified local table remains unsupported for scoring.
 - XXL recognition is conservative. If it is unclear in the screenshot, the status remains unknown and the score is a range.
 
 ## Sources

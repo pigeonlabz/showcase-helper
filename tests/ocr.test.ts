@@ -21,7 +21,13 @@ describe("OCR text extraction", () => {
     expect(recognizeSpecies("This Staryu was caught on 01/08/2025.")).toBe("Staryu");
     expect(recognizeSpecies("This Mr. Mime was caught yesterday.")).toBe("Mr. Mime");
     expect(POKEMON_SPECIES_NAMES).toHaveLength(1025);
-    expect(findSpecies("Staryu")).toBeUndefined();
+    expect(findSpecies("Staryu")).toMatchObject({
+      dex: 120,
+      meanHeightM: 0.8,
+      meanWeightKg: 34.5,
+      weightDeviationKg: 4.3125,
+      maxHeightClass: 1.75,
+    });
   });
 
   it("keeps successful OCR regions when one crop fails", async () => {
@@ -42,7 +48,7 @@ describe("OCR text extraction", () => {
     });
   });
 
-  it("preserves OCR fields when IV pixel detection throws and scoring data is unavailable", () => {
+  it("preserves OCR fields when IV pixel detection throws", () => {
     const text = "CP 479 This Staryu was caught on 01/08/2025 Weight 56.36kg Height 1.32m XXL";
     const record = assembleScanRecord(
       { name: "staryu-appraisal.jpg" },
@@ -56,8 +62,11 @@ describe("OCR text extraction", () => {
     expect(record).toMatchObject({ species: "Staryu", cp: 479, heightM: 1.32, weightKg: 56.36, xxl: true });
     expect(record.ivs).toEqual({ attack: null, defense: null, hp: null });
     expect(record.reviewReasons).toContain("IV bar detection failed; enter the appraisal IVs manually.");
-    expect(findSpecies(record.species)).toBeUndefined();
-    expect(calculateScore(record, findSpecies(record.species)).supported).toBe(false);
+    const score = calculateScore(record, findSpecies(record.species));
+    expect(score.supported).toBe(true);
+    expect(score.exact).toBeNull();
+    expect(score.low).not.toBeNull();
+    expect(score.high).not.toBeNull();
   });
 
   it("leaves IVs unknown when appraisal bars are not provided", () => {
