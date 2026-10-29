@@ -1,4 +1,5 @@
 import type { SpeciesData } from "./types";
+import { POKEMON_SPECIES_NAMES } from "./pokemon-names";
 
 // Initial verified MVP data. Unknown species deliberately have no fallback multiplier.
 export const SPECIES: SpeciesData[] = [
@@ -27,9 +28,37 @@ export function findSpecies(name: string): SpeciesData | undefined {
 }
 
 export function recognizeSpecies(text: string): string {
-  const normalized = text.toLocaleLowerCase();
-  return SPECIES.find((species) => {
-    const escaped = species.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`, "i").test(normalized);
-  })?.name ?? "";
+  const caughtName = text.match(/\bThis\s+(.+?)\s+was\s+caught\b/i)?.[1];
+  return (caughtName ? matchKnownSpecies(caughtName) : "") || matchKnownSpecies(text);
+}
+
+const NAME_ALIASES: Array<[string, string]> = [
+  ["Nidoran F", "Nidoran♀"],
+  ["Nidoran M", "Nidoran♂"],
+];
+
+const speciesMatchers = [
+  ...POKEMON_SPECIES_NAMES.map((name) => ({ name, normalized: normalizeSpeciesName(name) })),
+  ...NAME_ALIASES.map(([alias, name]) => ({ name, normalized: normalizeSpeciesName(alias) })),
+].sort((a, b) => b.normalized.length - a.normalized.length);
+
+function matchKnownSpecies(text: string): string {
+  const normalized = normalizeSpeciesName(text);
+  if (!normalized) return "";
+  const exact = speciesMatchers.find((species) => species.normalized === normalized);
+  if (exact) return exact.name;
+  const padded = ` ${normalized} `;
+  return speciesMatchers.find((species) => padded.includes(` ${species.normalized} `))?.name ?? "";
+}
+
+function normalizeSpeciesName(text: string): string {
+  return text.normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .replace(/♀/g, " female ")
+    .replace(/♂/g, " male ")
+    .toLocaleLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
 }

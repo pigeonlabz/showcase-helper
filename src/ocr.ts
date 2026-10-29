@@ -9,7 +9,10 @@ export type OCRResult = {
   words: OCRWord[];
   ivLabels: OCRWord[];
   cpHint: number | null;
+  failedCrops: OCRCropName[];
 };
+
+export type OCRCropRead = { text: string; words?: OCRWord[] };
 
 export const OCR_CROPS = {
   cp: { x: 0.27, y: 0.035, width: 0.46, height: 0.09 },
@@ -40,67 +43,117 @@ export async function recognizeImage(
   height: number,
   logger?: (progress: number) => void,
 ): Promise<OCRResult> {
-  const cropNames = Object.keys(OCR_CROPS) as OCRCropName[];
   let activeCropIndex = 0;
   const worker = await createWorker("eng", 1, {
     logger: (message) => {
       if (message.status === "recognizing text" && typeof message.progress === "number") {
-        logger?.((activeCropIndex + Math.max(0, Math.min(1, message.progress))) / cropNames.length);
+        logger?.((activeCropIndex + Math.max(0, Math.min(1, message.progress))) / Object.keys(OCR_CROPS).length);
       }
     },
   });
-  const texts: string[] = [];
-  const words: OCRWord[] = [];
-  let cpHint: number | null = null;
-  let ivLabels: OCRWord[] = [];
   try {
-    await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
-    for (const [index, name] of cropNames.entries()) {
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+    } catch {
+      // Continue with Tesseract's default page segmentation if configuration fails.
+    }
+    return await recognizeOCRCrops(async (name, index) => {
       activeCropIndex = index;
       const crop = OCR_CROPS[name];
+      const scale = 3;
+      try {
+        await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+      } catch {
+        // The crop can still be attempted with the worker's previous page segmentation mode.
+      }
       const canvas = cropAndScale(
         source,
         width * crop.x,
         height * crop.y,
         width * crop.width,
         height * crop.height,
-        3,
+        scale,
       );
       try {
         const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
-        texts.push(result.data.text);
+        let text = result.data.text;
+        if (name === "cp" && parseCPHint(text) === null) {
+          try {
+            await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+            const alternateCanvas = cropAndScale(source, width * crop.x, height * crop.y, width * crop.width, height * crop.height, 4);
+            try {
+              const alternate = await worker.recognize(alternateCanvas, {}, { text: true });
+              if (parseCPHint(alternate.data.text) !== null) text = alternate.data.text;
+            } finally {
+              alternateCanvas.width = 0;
+              alternateCanvas.height = 0;
+            }
+          } catch {
+            // Keep the first crop text and leave CP unknown if the alternate pass fails.
+          } finally {
+            try { await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK }); } catch { /* Keep the worker usable. */ }
+          }
+        }
         const regionWords = wordsFromBlocks(result.data.blocks ?? []).map((word) => ({
           ...word,
           bbox: {
-            x0: word.bbox.x0 / 3 + width * crop.x,
-            y0: word.bbox.y0 / 3 + height * crop.y,
-            x1: word.bbox.x1 / 3 + width * crop.x,
-            y1: word.bbox.y1 / 3 + height * crop.y,
+          x0: word.bbox.x0 / scale + width * crop.x,
+          y0: word.bbox.y0 / scale + height * crop.y,
+          x1: word.bbox.x1 / scale + width * crop.x,
+          y1: word.bbox.y1 / scale + height * crop.y,
           },
         }));
-        words.push(...regionWords);
-        if (name === "cp") cpHint = parseCPHint(result.data.text);
-        if (name === "bars") ivLabels = regionWords;
-        logger?.((index + 1) / cropNames.length);
+        return { text, words: regionWords };
       } finally {
         canvas.width = 0;
         canvas.height = 0;
       }
-    }
+    }, logger);
   } finally {
-    await worker.terminate();
+    try {
+      await worker.terminate();
+    } catch {
+      // Worker shutdown must not erase crop results already recovered.
+    }
+  }
+}
+
+/** Read every OCR region independently so one crop failure does not discard the others. */
+export async function recognizeOCRCrops(
+  readCrop: (name: OCRCropName, index: number) => Promise<OCRCropRead>,
+  logger?: (progress: number) => void,
+): Promise<OCRResult> {
+  const cropNames = Object.keys(OCR_CROPS) as OCRCropName[];
+  const texts: string[] = [];
+  const words: OCRWord[] = [];
+  const failedCrops: OCRCropName[] = [];
+  let cpHint: number | null = null;
+  let ivLabels: OCRWord[] = [];
+  for (const [index, name] of cropNames.entries()) {
+    try {
+      const result = await readCrop(name, index);
+      texts.push(result.text);
+      words.push(...(result.words ?? []));
+      if (name === "cp") cpHint = parseCPHint(result.text);
+      if (name === "bars") ivLabels = result.words ?? [];
+    } catch {
+      failedCrops.push(name);
+    } finally {
+      logger?.((index + 1) / cropNames.length);
+    }
   }
   const usefulWords = words.filter((word) => word.text.trim().length > 0);
   const confidence = usefulWords.length
     ? usefulWords.reduce((sum, word) => sum + word.confidence, 0) / usefulWords.length
     : 0;
-  return { text: texts.join("\n"), confidence, words, ivLabels, cpHint };
+  return { text: texts.join("\n"), confidence, words, ivLabels, cpHint, failedCrops };
 }
 
 export function parseCPHint(text: string): number | null {
   const corrected = text.replace(/([A-Z])[Il|](?=\d)/gi, (_match, prefix: string) => `${prefix}1`);
   const match = corrected.match(/(?:CP|CR)[^0-9]{0,3}((?:\d\s*){2,5})\b/i);
-  const value = match ? Number(match[1].replace(/\s/g, "")) : null;
+  const bareNumber = corrected.trim().match(/^(\d(?:\s*\d){1,4})\s*[|!.,]?$/)?.[1];
+  const value = match ? Number(match[1].replace(/\s/g, "")) : bareNumber ? Number(bareNumber.replace(/\s/g, "")) : null;
   return value !== null && value > 0 && value < 10000 ? value : null;
 }
 
@@ -133,7 +186,7 @@ export function parseOCR(text: string, cpHint: number | null = null): Pick<ScanR
   const height = cleaned.match(/(?:HEIGHT\s*)?([0-9]{1,4}[.,][0-9]{1,3})\s*M\b/i)?.[1];
   return {
     species: recognizeSpecies(cleaned),
-    cp: cp ? Number(cp) : cpHint,
+    cp: cpHint ?? (cp ? Number(cp) : null),
     heightM: height ? Number(height.replace(",", ".")) : null,
     weightKg: weight ? Number(weight.replace(",", ".")) : null,
     xxl: /\bXXL\b/i.test(cleaned) ? true : null,
@@ -145,36 +198,76 @@ export async function createScanRecord(
   id: string,
   logger?: (progress: number) => void,
 ): Promise<ScanRecord> {
-  const image = await loadImagePixels(file);
-  let ocr: OCRResult;
-  let foundIVs: ReturnType<typeof readIVBars>;
+  let image: Awaited<ReturnType<typeof loadImagePixels>>;
+  try {
+    image = await loadImagePixels(file);
+  } catch {
+    return assembleScanRecord(file, id, emptyOCRResult(), () => null, "Could not open this image. Choose another photo or enter known values manually.");
+  }
+  let ocr = emptyOCRResult();
+  let ocrFailure: string | undefined;
   try {
     ocr = await recognizeImage(image.source, image.width, image.height, logger);
-    foundIVs = readIVBars(image.data, image.width, image.height, ocr.ivLabels);
+  } catch {
+    ocrFailure = "Text recognition could not complete. Enter values manually where needed.";
+  }
+  try {
+    return assembleScanRecord(
+      file,
+      id,
+      ocr,
+      () => readIVBars(image.data, image.width, image.height, ocr.ivLabels),
+      ocrFailure,
+    );
   } finally {
     image.dispose();
   }
+}
+
+/** Build a result from successful OCR fields, isolating any IV pixel-analysis failure. */
+export function assembleScanRecord(
+  file: Pick<File, "name">,
+  id: string,
+  ocr: OCRResult,
+  detectIVs: () => ReturnType<typeof readIVBars>,
+  ocrFailure?: string,
+  scannedAt = new Date().toISOString(),
+): ScanRecord {
   const extracted = parseOCR(ocr.text, ocr.cpHint);
+  let foundIVs: ReturnType<typeof readIVBars> = null;
+  let ivFailure = false;
+  try {
+    foundIVs = detectIVs();
+  } catch {
+    ivFailure = true;
+  }
 
   const reviewReasons: string[] = [];
-  if (!extracted.species) reviewReasons.push("Choose the Pokémon species.");
-  if (extracted.cp === null) reviewReasons.push("CP was not read; check it manually.");
-  if (extracted.heightM === null) reviewReasons.push("Height was not read; check it manually.");
-  if (extracted.weightKg === null) reviewReasons.push("Weight was not read; check it manually.");
-  if (extracted.xxl === null) reviewReasons.push("XXL status was not clear; check it manually.");
-  if (!foundIVs) reviewReasons.push("Appraisal bars were not clear; enter IVs manually if visible.");
-  if (ocr.confidence < 55) reviewReasons.push("OCR confidence is low; review extracted values.");
+  if (!extracted.species) reviewReasons.push("Species was not read; choose it manually.");
+  if (extracted.cp === null) reviewReasons.push("CP was not read (optional; not used for scoring).");
+  if (extracted.heightM === null) reviewReasons.push("Height was not read; enter it manually.");
+  if (extracted.weightKg === null) reviewReasons.push("Weight was not read; enter it manually.");
+  if (extracted.xxl === null) reviewReasons.push("XXL status was not clear; choose it manually.");
+  if (!foundIVs) reviewReasons.push(ivFailure
+    ? "IV bar detection failed; enter the appraisal IVs manually."
+    : "Appraisal IV values were not found; enter them manually if visible.");
+  if (ocr.confidence < 55 && ocr.text.trim()) reviewReasons.push("OCR confidence is low; review the extracted fields.");
+  if (ocrFailure) reviewReasons.unshift(ocrFailure);
 
   return {
     scanId: id,
     fileName: file.name,
-    scannedAt: new Date().toISOString(),
+    scannedAt,
     ...extracted,
     ivs: foundIVs ?? { attack: null, defense: null, hp: null },
     confidence: Math.round(ocr.confidence),
     reviewReasons,
     ocrText: ocr.text,
   };
+}
+
+function emptyOCRResult(): OCRResult {
+  return { text: "", confidence: 0, words: [], ivLabels: [], cpHint: null, failedCrops: [] };
 }
 
 async function loadImagePixels(file: File): Promise<{ data: Uint8ClampedArray; width: number; height: number; source: HTMLImageElement; dispose: () => void }> {

@@ -1,5 +1,6 @@
 import { createScanRecord, parseOCR } from "./ocr";
-import { findSpecies, SPECIES } from "./species";
+import { findSpecies } from "./species";
+import { POKEMON_SPECIES_NAMES } from "./pokemon-names";
 import { calculateScore, formatPoints } from "./scoring";
 import { submitManualEdits, type ManualEditErrors, type ManualScanEdits } from "./editing";
 import { newScanId } from "./data";
@@ -55,11 +56,11 @@ app.innerHTML = `
 
     <details class="method-note">
       <summary>About estimates</summary>
-      <p>Scores use height, weight, IVs and XXL status. CP does not count. In-game sizes are rounded, so scores are estimates. Scoring data is currently available for Bulbasaur and Machop.</p>
+      <p>Scores use height, weight, IVs and XXL status. CP does not count. In-game sizes are rounded, so scores are estimates. Some Pokémon do not yet have verified size data.</p>
     </details>
     <footer>Photos stay in this browser. No scan history is saved.</footer>
   </main>
-  <datalist id="supported-species">${SPECIES.map((species) => `<option value="${species.name}"></option>`).join("")}</datalist>
+  <datalist id="supported-species">${POKEMON_SPECIES_NAMES.map((name) => `<option value="${name}"></option>`).join("")}</datalist>
 `;
 
 const imageInput = app.querySelector<HTMLInputElement>("#image-input")!;
@@ -245,7 +246,7 @@ async function processFiles(files: File[]): Promise<void> {
         ...fallback,
         ivs: { attack: null, defense: null, hp: null },
         confidence: 0,
-        reviewReasons: ["Could not scan this image. Try a clearer screenshot or enter the values below."],
+        reviewReasons: ["Image processing failed. Try another photo or enter visible values manually."],
         ocrText: "",
       });
     }
@@ -341,26 +342,34 @@ function renderCard(record: ScanRecord, index: number): string {
   const species = findSpecies(record.species);
   const score = calculateScore(record, species);
   const exactReady = score.exact !== null;
-  const status = !species && record.species ? "Not supported" : record.reviewReasons.length ? "Check details" : score.exact === null ? "Score range" : "Estimate";
+  const unsupportedScoring = Boolean(record.species && !species);
+  const status = unsupportedScoring ? "Scoring unavailable" : !record.species ? "Choose species" : record.reviewReasons.length ? "Check details" : score.exact === null ? "Score range" : "Estimate";
   const displayedScore = score.exact !== null
     ? formatPoints(score.exact)
-    : score.low !== null && score.high !== null ? `${Math.floor(score.low)}–${Math.ceil(score.high)}` : "—";
+    : score.low !== null && score.high !== null ? `${Math.floor(score.low)}–${Math.ceil(score.high)}` : unsupportedScoring ? "N/A" : "—";
+  const scoreCaption = unsupportedScoring
+    ? "No verified size data"
+    : score.low !== null && score.high !== null
+      ? `${score.exact === null ? "Range" : "Size range"} ${Math.floor(score.low)}–${Math.ceil(score.high)}`
+      : "Enter height and weight";
   const reviewText = record.reviewReasons.length ? `<ul class="review-list">${record.reviewReasons.map((reason) => `<li>${escapeHTML(reason)}</li>`).join("")}</ul>` : "";
-  const nickname = score.exact === null ? "Add IVs to create nickname" : `${record.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;
+  const nickname = score.exact === null
+    ? unsupportedScoring ? "Scoring data unavailable" : "Complete IVs and size for nickname"
+    : `${record.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;
   const sizeStatus = record.xxl === true ? "XXL" : record.xxl === false ? "Not XXL" : "Size unknown";
-  const unsupportedText = !species && record.species ? `<p class="review-message">No size data for ${escapeHTML(record.species)}. Score unavailable.</p>` : "";
+  const unsupportedText = unsupportedScoring ? `<p class="review-message">Scoring data unavailable for ${escapeHTML(record.species)}. Extracted values are retained.</p>` : "";
   const breakdown = score.parts
     ? `<div class="score-breakdown"><span>Height <b>${score.parts.height.toFixed(1)}</b></span><span>Weight <b>${score.parts.weight.toFixed(1)}</b></span><span>IVs <b>${score.parts.ivs.toFixed(1)}</b></span><span>XXL <b>${score.parts.xxl.toFixed(1)}</b></span></div>`
     : "";
   return `
     <article class="scan-card" data-scan-id="${escapeHTML(record.scanId)}">
-      <div class="card-topline"><span class="scan-order">Scan ${index + 1}</span><span class="status-pill ${status === "Estimate" ? "is-ready" : status === "Not supported" ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span></div>
+      <div class="card-topline"><span class="scan-order">Scan ${index + 1}</span><span class="status-pill ${status === "Estimate" ? "is-ready" : unsupportedScoring ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span></div>
       <div class="compact-facts">
         <div class="pokemon-summary">
           <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong></div>
           <div class="pokemon-facts"><span class="fact-chip">CP ${value(record.cp) || "—"}</span><span class="fact-chip ${record.xxl ? "fact-chip-xxl" : ""}">${sizeStatus}</span></div>
         </div>
-        <div class="score-block"><span class="score-label">Estimated score</span><strong>${displayedScore}</strong><small>${score.low !== null && score.high !== null ? `${score.exact === null ? "Range" : "Size range"} ${Math.floor(score.low)}–${Math.ceil(score.high)}` : "Enter size to estimate"}</small></div>
+        <div class="score-block"><span class="score-label">Estimated score</span><strong>${displayedScore}</strong><small>${scoreCaption}</small></div>
       </div>
       <div class="nickname-row"><div class="nickname-copy"><span>Nickname</span><strong>${escapeHTML(nickname)}</strong></div><button class="copy-button" type="button" data-copy-scan="${escapeHTML(record.scanId)}" aria-label="${exactReady ? `Copy nickname ${escapeHTML(nickname)}` : "Enter all IVs to enable nickname copy"}" ${exactReady ? "" : "disabled"}>Copy</button></div>
       ${unsupportedText}

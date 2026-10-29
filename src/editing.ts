@@ -26,7 +26,7 @@ export function submitManualEdits(record: ScanRecord, values: ManualScanEdits): 
   if (!speciesName) errors.species = "Enter a Pokémon species.";
   else if (speciesName.length > 50) errors.species = "Use a species name up to 50 characters.";
 
-  const cp = parseRequiredNumber(values.cp, "cp", 9, 99999, true, errors, "Enter a CP from 10 to 99,999.");
+  const cp = parseOptionalCP(values.cp, errors);
   const heightM = parseRequiredNumber(values.heightM, "heightM", 0, 1000, false, errors, "Enter a height greater than 0 m.");
   const weightKg = parseRequiredNumber(values.weightKg, "weightKg", 0, 100000, false, errors, "Enter a weight greater than 0 kg.");
   const xxl = values.xxl;
@@ -43,12 +43,12 @@ export function submitManualEdits(record: ScanRecord, values: ManualScanEdits): 
   const updatedRecord: ScanRecord = {
     ...record,
     species: normalizedSpecies,
-    cp: cp!,
+    cp,
     heightM: heightM!,
     weightKg: weightKg!,
     xxl: xxl === "unknown" ? null : xxl === "yes",
     ivs: { attack, defense, hp },
-    reviewReasons: speciesData ? [] : [`Scoring data is not available for ${normalizedSpecies}.`],
+    reviewReasons: speciesData ? [] : [`Scoring data unavailable for ${normalizedSpecies}.`],
   };
   const score = calculateScore(updatedRecord, speciesData);
   const nickname = score.exact === null
@@ -60,7 +60,7 @@ export function submitManualEdits(record: ScanRecord, values: ManualScanEdits): 
 
 function parseRequiredNumber(
   rawValue: string,
-  field: "cp" | "heightM" | "weightKg",
+  field: "heightM" | "weightKg",
   min: number,
   max: number,
   integer: boolean,
@@ -71,6 +71,17 @@ function parseRequiredNumber(
   const parsed = normalized === "" ? Number.NaN : Number(normalized);
   if (!Number.isFinite(parsed) || parsed <= min || parsed > max || (integer && !Number.isInteger(parsed))) {
     errors[field] = message;
+    return null;
+  }
+  return parsed;
+}
+
+function parseOptionalCP(rawValue: string, errors: ManualEditErrors): number | null {
+  const normalized = rawValue.trim();
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 10 || parsed > 99999) {
+    errors.cp = "Enter a whole CP from 10 to 99,999, or leave it blank if unknown.";
     return null;
   }
   return parsed;

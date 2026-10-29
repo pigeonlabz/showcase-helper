@@ -45,6 +45,16 @@ describe("manual scan edits", () => {
     expect(sample.ivs.attack).toBe(15);
   });
 
+  it("allows CP to remain unknown without blocking score recalculation", () => {
+    const result = submitManualEdits(sample, { ...corrected, cp: "" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.record.cp).toBeNull();
+    expect(result.score.exact).not.toBeNull();
+    expect(result.nickname).not.toBeNull();
+  });
+
   it("returns actionable errors without changing the scan when values are invalid", () => {
     const result = submitManualEdits(sample, {
       ...corrected,
