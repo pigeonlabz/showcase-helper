@@ -1,7 +1,7 @@
 import { createScanRecord, parseOCR } from "./ocr";
 import { findSpecies, SPECIES } from "./species";
 import { calculateScore, formatPoints } from "./scoring";
-import { exportCSV, exportJSON, importJSON, newScanId } from "./data";
+import { newScanId } from "./data";
 import type { ScanRecord } from "./types";
 import "./style.css";
 
@@ -11,92 +11,70 @@ if (!app) throw new Error("App root is missing.");
 let records: ScanRecord[] = [];
 let isProcessing = false;
 let sortBy: "score" | "species" | "cp" | "order" = "score";
-let progressLabel = "Ready for screenshots";
+let progressLabel = "";
 let progressValue = 0;
 
 app.innerHTML = `
   <main class="shell">
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">XL</div>
-      <div><p class="eyebrow">POKÉMON GO TOOL</p><h1>Showcase Helper</h1></div>
-      <span class="privacy-chip"><span></span>On this device</span>
+      <div><p class="eyebrow">POKÉMON GO</p><h1>Showcase Helper</h1></div>
     </header>
-    <p class="intro">Estimate Biggest Showcase scores from your Pokémon screenshots. Images stay in this browser and are cleared after processing.</p>
+    <p class="intro">Find your best Biggest Showcase Pokémon.</p>
 
     <section class="upload-panel" aria-labelledby="upload-title">
       <div id="drop-zone" class="drop-zone">
         <div class="upload-icon" aria-hidden="true">＋</div>
-        <h2 id="upload-title">Add Pokémon screenshots</h2>
-        <p>Choose one or more images, or drop them here</p>
-        <label class="primary-button upload-button" for="image-input">Choose screenshots</label>
-        <input id="image-input" class="visually-hidden" type="file" accept="image/*" multiple />
-        <small>Photos, screenshots, JPEG, PNG, HEIC supported by your browser</small>
+        <h2 id="upload-title">Choose screenshots</h2>
+        <p>Select one or more Pokémon photos.</p>
+        <label class="primary-button upload-button" for="image-input">Choose photos</label>
+        <input id="image-input" class="visually-hidden" type="file" accept="image/*" multiple aria-label="Choose Pokémon screenshots" />
+        <small>Photos are scanned on this device.</small>
       </div>
-      <div class="progress-wrap" aria-live="polite">
-        <div class="progress-copy"><span id="progress-label">${progressLabel}</span><span id="progress-count">0%</span></div>
+      <div id="progress-wrap" class="progress-wrap" aria-live="polite" hidden>
+        <div class="progress-copy"><span id="progress-label"></span><span id="progress-count">0%</span></div>
         <progress id="progress-bar" max="100" value="0"></progress>
       </div>
     </section>
 
-    <section class="privacy-note"><span aria-hidden="true">🔒</span><span><strong>Private by design.</strong> OCR and pixel analysis run locally. Screenshots are not sent, saved, or included in exports.</span></section>
-
     <section id="results-section" class="results-section" aria-labelledby="results-title">
       <div class="results-heading">
-        <div><p class="eyebrow">YOUR SCANS</p><h2 id="results-title">Results <span id="result-count" class="count-pill">0</span></h2></div>
-        <div class="toolbar">
-          <label class="sort-label">Sort <select id="sort-select" aria-label="Sort results">
+        <h2 id="results-title">Results <span id="result-count" class="count-pill">0</span></h2>
+        <label id="add-more-button" class="secondary-button add-more-button" for="image-input" hidden>＋ Add photos</label>
+      </div>
+      <div class="toolbar">
+        <label class="sort-label"><span class="visually-hidden">Sort results</span><select id="sort-select" aria-label="Sort results">
             <option value="score">Highest score</option><option value="species">Species</option><option value="cp">CP</option><option value="order">Scan order</option>
           </select></label>
-          <button id="clear-button" class="quiet-button" type="button" disabled>Clear results</button>
-        </div>
+        <button id="clear-button" class="quiet-button" type="button" disabled>Clear</button>
       </div>
-      <div class="export-row">
-        <button id="json-export" class="secondary-button" type="button" disabled>Export JSON</button>
-        <label class="secondary-button import-button" for="json-input">Import JSON</label>
-        <input id="json-input" class="visually-hidden" type="file" accept="application/json,.json" />
-        <button id="csv-export" class="secondary-button" type="button" disabled>Export CSV</button>
-      </div>
-      <div id="empty-state" class="empty-state"><div class="empty-mark" aria-hidden="true">◎</div><strong>No scans yet</strong><span>Your separate scan results will appear here.</span></div>
+      <div id="empty-state" class="empty-state"><strong>No scans yet</strong><span>Choose photos above to get started.</span></div>
       <div id="results-list" class="results-list"></div>
     </section>
 
     <details class="method-note">
-      <summary>About score estimates and supported species</summary>
-      <p>Standard single-species Biggest Showcases use height (800 points), weight (150), IVs (50), and a flat 178-point XXL bonus. CP is not part of the formula. Displayed size values are rounded, so the estimate includes a small range.</p>
-      <p>Species data is currently included for Bulbasaur and Machop. Other species can be entered manually, but their score is marked unsupported until species-specific size data is added. Other Showcase formats are not supported.</p>
+      <summary>About estimates</summary>
+      <p>Scores use height, weight, IVs and XXL status. CP does not count. In-game sizes are rounded, so scores are estimates. Scoring data is currently available for Bulbasaur and Machop.</p>
     </details>
-    <footer>Showcase Helper · MVP · No account or history storage</footer>
+    <footer>Photos stay in this browser. No scan history is saved.</footer>
   </main>
   <datalist id="supported-species">${SPECIES.map((species) => `<option value="${species.name}"></option>`).join("")}</datalist>
 `;
 
 const imageInput = app.querySelector<HTMLInputElement>("#image-input")!;
-const jsonInput = app.querySelector<HTMLInputElement>("#json-input")!;
 const dropZone = app.querySelector<HTMLDivElement>("#drop-zone")!;
 const resultsList = app.querySelector<HTMLDivElement>("#results-list")!;
 const emptyState = app.querySelector<HTMLDivElement>("#empty-state")!;
+const progressWrap = app.querySelector<HTMLDivElement>("#progress-wrap")!;
 const progressElement = app.querySelector<HTMLProgressElement>("#progress-bar")!;
 const progressText = app.querySelector<HTMLSpanElement>("#progress-label")!;
 const progressCount = app.querySelector<HTMLSpanElement>("#progress-count")!;
+const addMoreButton = app.querySelector<HTMLLabelElement>("#add-more-button")!;
 
 imageInput.addEventListener("change", () => {
-  if (imageInput.files) void processFiles(Array.from(imageInput.files));
+  const files = Array.from(imageInput.files ?? []);
+  if (files.length) void processFiles(files);
   imageInput.value = "";
-});
-
-jsonInput.addEventListener("change", async () => {
-  const file = jsonInput.files?.[0];
-  jsonInput.value = "";
-  if (!file) return;
-  try {
-    const imported = importJSON(await file.text());
-    imported.forEach((record, index) => { record.scanId = nextUniqueScanId(imported.slice(0, index)); });
-    records.push(...imported);
-    setStatus(`Imported ${imported.length} separate scan${imported.length === 1 ? "" : "s"}.`);
-    renderResults();
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : "Could not import this JSON file.");
-  }
 });
 
 dropZone.addEventListener("dragover", (event) => {
@@ -120,17 +98,10 @@ app.querySelector<HTMLSelectElement>("#sort-select")!.addEventListener("change",
 
 app.querySelector<HTMLButtonElement>("#clear-button")!.addEventListener("click", () => {
   records = [];
-  progressLabel = "Ready for screenshots";
+  progressLabel = "";
   progressValue = 0;
   renderProgress();
   renderResults();
-});
-
-app.querySelector<HTMLButtonElement>("#json-export")!.addEventListener("click", () => {
-  download("showcase-scans.json", exportJSON(records), "application/json");
-});
-app.querySelector<HTMLButtonElement>("#csv-export")!.addEventListener("click", () => {
-  download("showcase-scans.csv", exportCSV(records), "text/csv;charset=utf-8");
 });
 
 function onFieldChange(event: Event): void {
@@ -164,25 +135,26 @@ resultsList.addEventListener("click", async (event) => {
   const nickname = `${label} ${formatPoints(score.exact)}`;
   try {
     await copyText(nickname);
-    target.textContent = "Copied";
-    window.setTimeout(() => { target.textContent = "Copy nickname"; }, 1500);
+    target.textContent = "Copied!";
+    target.setAttribute("aria-label", `Copied ${nickname}`);
+    window.setTimeout(() => {
+      target.textContent = "Copy";
+      target.setAttribute("aria-label", `Copy nickname ${nickname}`);
+    }, 1600);
   } catch {
     target.textContent = "Copy failed";
-    window.setTimeout(() => { target.textContent = "Copy nickname"; }, 1800);
+    target.setAttribute("aria-label", "Copy failed. You can select the nickname text manually.");
+    window.setTimeout(() => {
+      target.textContent = "Copy";
+      target.setAttribute("aria-label", `Copy nickname ${nickname}`);
+    }, 1800);
   }
 });
 
-function setStatus(message: string): void {
-  progressLabel = message;
-  if (!isProcessing) {
-    progressValue = 100;
-    renderProgress();
-  }
-}
-
 function renderProgress(): void {
+  progressWrap.hidden = !isProcessing && !progressLabel;
   progressText.textContent = progressLabel;
-  progressCount.textContent = `${Math.round(progressValue)}%`;
+  progressCount.textContent = isProcessing ? `${Math.round(progressValue)}%` : "Done";
   progressElement.value = progressValue;
   progressElement.toggleAttribute("aria-busy", isProcessing);
 }
@@ -195,7 +167,7 @@ async function processFiles(files: File[]): Promise<void> {
   const startCount = records.length;
   for (const [index, file] of files.entries()) {
     const id = nextUniqueScanId();
-    progressLabel = `Processing ${index + 1} of ${files.length}: ${file.name}`;
+    progressLabel = `Scanning ${index + 1} of ${files.length}`;
     progressValue = (index / files.length) * 100;
     renderProgress();
     try {
@@ -204,7 +176,7 @@ async function processFiles(files: File[]): Promise<void> {
         renderProgress();
       });
       records.push(record);
-    } catch (error) {
+    } catch {
       const fallback = parseOCR("");
       records.push({
         scanId: id,
@@ -213,7 +185,7 @@ async function processFiles(files: File[]): Promise<void> {
         ...fallback,
         ivs: { attack: null, defense: null, hp: null },
         confidence: 0,
-        reviewReasons: [error instanceof Error ? error.message : "Could not process this image."],
+        reviewReasons: ["Could not scan this image. Try a clearer screenshot or enter the values below."],
         ocrText: "",
       });
     }
@@ -221,7 +193,7 @@ async function processFiles(files: File[]): Promise<void> {
   }
   isProcessing = false;
   progressValue = 100;
-  progressLabel = `Finished ${files.length} screenshot${files.length === 1 ? "" : "s"}. ${records.length - startCount} separate scan${files.length === 1 ? "" : "s"} added.`;
+  progressLabel = `Scanned ${files.length} photo${files.length === 1 ? "" : "s"} · ${records.length - startCount} result${records.length - startCount === 1 ? "" : "s"} added`;
   renderProgress();
   renderResults();
 }
@@ -247,12 +219,12 @@ function parseFieldNumber(value: string, min: number, max: number): number | nul
 
 function reviewReasonsFor(record: ScanRecord): string[] {
   const reasons: string[] = [];
-  if (!record.species) reasons.push("Choose the Pokémon species.");
-  if (record.cp === null) reasons.push("CP is missing.");
-  if (record.heightM === null) reasons.push("Height is missing.");
-  if (record.weightKg === null) reasons.push("Weight is missing.");
-  if (record.xxl === null) reasons.push("XXL status is unknown.");
-  if (record.confidence < 55) reasons.push("OCR confidence is low; review extracted values.");
+  if (!record.species) reasons.push("Choose a species.");
+  if (record.cp === null) reasons.push("Add the CP.");
+  if (record.heightM === null) reasons.push("Add the height.");
+  if (record.weightKg === null) reasons.push("Add the weight.");
+  if (record.xxl === null) reasons.push("Set XXL status.");
+  if (record.confidence < 55 && reasons.length === 0) reasons.push("Check the detected values.");
   return reasons;
 }
 
@@ -279,12 +251,19 @@ function scoreSortValue(record: ScanRecord): number {
 
 function renderResults(restoreFocus?: { scanId: string; field: string; start: number | null; end: number | null }): void {
   const sorted = sortRecords();
+  const openEditors = new Set(
+    Array.from(resultsList.querySelectorAll<HTMLDetailsElement>("details.edit-controls[open]"))
+      .map((details) => details.closest<HTMLElement>("[data-scan-id]")?.dataset.scanId)
+      .filter((scanId): scanId is string => Boolean(scanId)),
+  );
   emptyState.hidden = sorted.length > 0;
   app!.querySelector<HTMLSpanElement>("#result-count")!.textContent = String(records.length);
   app!.querySelector<HTMLButtonElement>("#clear-button")!.disabled = records.length === 0 || isProcessing;
-  app!.querySelector<HTMLButtonElement>("#json-export")!.disabled = records.length === 0;
-  app!.querySelector<HTMLButtonElement>("#csv-export")!.disabled = records.length === 0;
+  addMoreButton.hidden = records.length === 0 || isProcessing;
   resultsList.innerHTML = sorted.map((record, index) => renderCard(record, index)).join("");
+  for (const card of resultsList.querySelectorAll<HTMLElement>("[data-scan-id]")) {
+    if (openEditors.has(card.dataset.scanId ?? "")) card.querySelector<HTMLDetailsElement>("details.edit-controls")!.open = true;
+  }
   if (restoreFocus) {
     const selector = `[data-scan-id="${CSS.escape(restoreFocus.scanId)}"] [data-field="${CSS.escape(restoreFocus.field)}"]`;
     const input = resultsList.querySelector<HTMLInputElement | HTMLSelectElement>(selector);
@@ -300,9 +279,9 @@ function renderCard(record: ScanRecord, index: number): string {
   const score = calculateScore(record, species);
   const exactReady = score.exact !== null;
   const status = !species && record.species
-    ? "Unsupported species data"
+    ? "Not supported"
     : record.reviewReasons.length
-      ? "Review needed"
+      ? "Check details"
       : score.exact === null
         ? "Score range"
         : "Estimate";
@@ -311,31 +290,46 @@ function renderCard(record: ScanRecord, index: number): string {
     : score.low !== null && score.high !== null
       ? `${Math.floor(score.low)}–${Math.ceil(score.high)}`
       : "—";
-  const confidenceText = record.confidence ? `${record.confidence}% OCR` : "OCR unchecked";
   const reviewText = record.reviewReasons.length ? `<ul class="review-list">${record.reviewReasons.map((reason) => `<li>${escapeHTML(reason)}</li>`).join("")}</ul>` : "";
+  const nickname = score.exact === null ? "Add IVs to create nickname" : `${record.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;
+  const sizeStatus = record.xxl === true ? "XXL" : record.xxl === false ? "Not XXL" : "Size unknown";
+  const unsupportedText = !species && record.species
+    ? `<p class="review-message">No size data for ${escapeHTML(record.species)}. Score unavailable.</p>`
+    : "";
   return `
     <article class="scan-card" data-scan-id="${escapeHTML(record.scanId)}">
       <div class="card-topline">
         <div class="scan-order">Scan ${index + 1}</div>
-        <span class="status-pill ${status === "Estimate" ? "is-ready" : "is-review"}">${escapeHTML(status)}</span>
+        <span class="status-pill ${status === "Estimate" ? "is-ready" : status === "Not supported" ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span>
       </div>
-      <div class="card-main">
-        <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong><span>${escapeHTML(record.fileName)} · ${confidenceText}</span></div>
-        <div class="score-block"><span>Estimated score</span><strong>${displayedScore}</strong>${score.low !== null && score.high !== null ? `<small>rounded-size range ${Math.floor(score.low)}–${Math.ceil(score.high)}</small>` : `<small>enter size to estimate</small>`}</div>
+      <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong></div>
+      <div class="pokemon-facts">
+        <span class="fact-chip">CP ${value(record.cp) || "—"}</span>
+        <span class="fact-chip ${record.xxl ? "fact-chip-xxl" : ""}">${sizeStatus}</span>
       </div>
-      <div class="scan-fields">
-        <label>Species<input type="text" list="supported-species" value="${escapeHTML(record.species)}" data-field="species" placeholder="Select or type species" /></label>
-        <label>CP<input type="text" inputmode="numeric" value="${value(record.cp)}" data-field="cp" placeholder="—" /></label>
-        <label>Height (m)<input type="text" inputmode="decimal" value="${value(record.heightM)}" data-field="heightM" placeholder="—" /></label>
-        <label>Weight (kg)<input type="text" inputmode="decimal" value="${value(record.weightKg)}" data-field="weightKg" placeholder="—" /></label>
-        <label>XXL<select data-field="xxl"><option value="unknown" ${record.xxl === null ? "selected" : ""}>Unknown</option><option value="yes" ${record.xxl === true ? "selected" : ""}>Yes</option><option value="no" ${record.xxl === false ? "selected" : ""}>No</option></select></label>
-        <label>Attack IV<input type="text" inputmode="numeric" value="${value(record.ivs.attack)}" data-field="iv-attack" placeholder="?" /></label>
-        <label>Defence IV<input type="text" inputmode="numeric" value="${value(record.ivs.defense)}" data-field="iv-defense" placeholder="?" /></label>
-        <label>HP IV<input type="text" inputmode="numeric" value="${value(record.ivs.hp)}" data-field="iv-hp" placeholder="?" /></label>
+      <div class="score-block">
+        <span class="score-label">Estimated Showcase score</span>
+        <strong>${displayedScore}</strong>
+        ${score.low !== null && score.high !== null ? `<small>Rounded size: ${Math.floor(score.low)}–${Math.ceil(score.high)}</small>` : `<small>Enter size details to estimate</small>`}
       </div>
-      ${species ? `<p class="species-data">Mean size ${species.meanHeightM.toFixed(2)} m · ${species.meanWeightKg.toFixed(1)} kg · XXL class ${species.maxHeightClass}×</p>` : `<p class="species-data">No species size data; score is unavailable.</p>`}
+      <div class="nickname-row"><span>Nickname</span><strong>${escapeHTML(nickname)}</strong></div>
+      <button class="copy-button" type="button" data-copy-scan="${escapeHTML(record.scanId)}" aria-label="${exactReady ? `Copy nickname ${escapeHTML(nickname)}` : "Enter all IVs to enable nickname copy"}" ${exactReady ? "" : "disabled"}>Copy</button>
+      ${unsupportedText}
       ${reviewText}
-      <div class="card-actions"><span class="scan-id">ID ${escapeHTML(record.scanId.slice(0, 8))}</span><button class="copy-button" type="button" data-copy-scan="${escapeHTML(record.scanId)}" ${exactReady ? "" : "disabled"}>${exactReady ? "Copy nickname" : "Enter IVs to copy"}</button></div>
+      <details class="edit-controls">
+        <summary>Edit details</summary>
+        <div class="scan-fields">
+          <label>Species<input type="text" list="supported-species" value="${escapeHTML(record.species)}" data-field="species" placeholder="Choose species" /></label>
+          <label>CP<input type="text" inputmode="numeric" value="${value(record.cp)}" data-field="cp" placeholder="—" /></label>
+          <label>Height (m)<input type="text" inputmode="decimal" value="${value(record.heightM)}" data-field="heightM" placeholder="—" /></label>
+          <label>Weight (kg)<input type="text" inputmode="decimal" value="${value(record.weightKg)}" data-field="weightKg" placeholder="—" /></label>
+          <label>XXL<select data-field="xxl"><option value="unknown" ${record.xxl === null ? "selected" : ""}>Unknown</option><option value="yes" ${record.xxl === true ? "selected" : ""}>Yes</option><option value="no" ${record.xxl === false ? "selected" : ""}>No</option></select></label>
+          <label>Attack IV<input type="text" inputmode="numeric" value="${value(record.ivs.attack)}" data-field="iv-attack" placeholder="?" /></label>
+          <label>Defence IV<input type="text" inputmode="numeric" value="${value(record.ivs.defense)}" data-field="iv-defense" placeholder="?" /></label>
+          <label>HP IV<input type="text" inputmode="numeric" value="${value(record.ivs.hp)}" data-field="iv-hp" placeholder="?" /></label>
+        </div>
+        <span class="scan-id">Scan ID ${escapeHTML(record.scanId.slice(0, 8))}</span>
+      </details>
     </article>`;
 }
 
@@ -347,29 +341,34 @@ function escapeHTML(valueToEscape: string): string {
   return valueToEscape.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 }
 
-function download(fileName: string, content: string, type: string): void {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Use the iOS-compatible selection fallback when Clipboard API access is denied.
+    }
   }
   const input = document.createElement("textarea");
   input.value = text;
+  input.readOnly = true;
   input.style.position = "fixed";
+  input.style.width = "2em";
+  input.style.height = "2em";
+  input.style.padding = "0";
+  input.style.fontSize = "16px";
   input.style.opacity = "0";
   document.body.append(input);
+  input.focus();
   input.select();
-  const copied = document.execCommand("copy");
-  input.remove();
+  input.setSelectionRange(0, input.value.length);
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    input.remove();
+  }
   if (!copied) throw new Error("Clipboard copy is unavailable.");
 }
 
