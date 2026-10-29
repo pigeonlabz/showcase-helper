@@ -20,11 +20,16 @@
   --focus: #95dced;
   --success: #9bd9b2;
   --warning: #e9c27f;
+  --theme-bg-image: url("./assets/background/types/steel.svg"), url("./assets/background/types/water.svg"), url("./assets/background/types/fairy.svg");
+  --theme-bg-position: 8% 14%, 76% 24%, 42% 82%;
+  --theme-bg-size: clamp(190px, 24vw, 330px), clamp(170px, 21vw, 295px), clamp(160px, 20vw, 275px);
+  --theme-bg-opacity: 0.08;
 }
 
 * { box-sizing: border-box; }
 
 html, body { min-width: 320px; min-height: 100%; }
+html { scroll-behavior: smooth; }
 body {
   position: relative;
   isolation: isolate;
@@ -41,9 +46,11 @@ body::before {
   position: fixed;
   z-index: 0;
   inset: 0;
-  background:
-    radial-gradient(ellipse at 10% 0%, rgb(141 91 176 / 15%), transparent 40%),
-    radial-gradient(ellipse at 95% 68%, rgb(97 66 128 / 11%), transparent 38%);
+  background-image: var(--theme-bg-image);
+  background-repeat: repeat;
+  background-size: var(--theme-bg-size);
+  background-position: var(--theme-bg-position);
+  opacity: var(--theme-bg-opacity);
   pointer-events: none;
   content: "";
 }
@@ -92,11 +99,27 @@ h1 { margin-bottom: 0; color: var(--text-strong); font-size: 21px; letter-spacin
 .intro { margin: 0 0 16px; color: var(--text-muted); font-size: 14px; }
 
 .upload-panel, .scan-card, .method-note {
+  position: relative;
+  isolation: isolate;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--panel);
   box-shadow: 0 10px 26px rgb(5 2 8 / 14%);
 }
+.upload-panel::before, .scan-card::before, .method-note::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--theme-bg-image);
+  background-repeat: repeat;
+  background-size: var(--theme-bg-size);
+  background-position: var(--theme-bg-position);
+  opacity: 0.1;
+  pointer-events: none;
+  content: "";
+}
+.upload-panel > *, .scan-card > *, .method-note > * { position: relative; z-index: 1; }
 .upload-panel { overflow: hidden; }
 .drop-zone {
   display: flex;
@@ -151,6 +174,7 @@ progress::-webkit-progress-value { border-radius: 999px; background: var(--accen
 progress::-moz-progress-bar { border-radius: 999px; background: var(--accent); }
 
 .results-section { min-width: 0; margin-top: 21px; }
+.results-heading { scroll-margin-top: max(16px, env(safe-area-inset-top)); }
 .results-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .results-heading h2 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-strong); font-size: 19px; letter-spacing: -0.03em; }
 .count-pill { display: inline-grid; min-width: 23px; height: 23px; place-items: center; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--panel-alt); color: var(--accent); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -234,6 +258,66 @@ footer { margin-top: 14px; color: var(--text-subtle); font-size: 11px; text-alig
 }
 [hidden] { display: none !important; }
 
+/* Compact scan summary; details below contain the less frequently used controls. */
+.compact-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pokemon-title strong { font-size: 19px; }
+.pokemon-facts { margin-top: 5px; }
+.score-block {
+  min-width: 100px;
+  margin-top: 0;
+  padding: 7px 9px;
+  text-align: right;
+}
+.score-block > strong { font-size: 26px; }
+.score-label, .score-block small { font-size: 11px; }
+.nickname-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 34%);
+  align-items: center;
+  gap: 10px;
+  margin: 9px 0 2px;
+}
+.nickname-copy { display: grid; min-width: 0; gap: 1px; }
+.nickname-copy span { color: var(--text-muted); font-size: 11px; }
+.nickname-copy strong { min-width: 0; color: var(--text-strong); font-size: 14px; line-height: 1.25; overflow-wrap: anywhere; }
+.copy-button { min-height: 46px; padding: 0 10px; }
+.result-details { margin-top: 7px; border-top: 1px solid var(--border); }
+.result-details summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+.result-details summary::-webkit-details-marker { display: none; }
+.result-details summary::after { color: var(--accent); content: "＋"; font-size: 16px; }
+.result-details[open] summary::after { content: "−"; }
+.details-content { min-width: 0; padding: 2px 0 3px; }
+.score-breakdown { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 0 0 9px; }
+.score-breakdown span { display: grid; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-alt); color: var(--text-subtle); font-size: 10px; }
+.score-breakdown b { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.technical-details { margin: 6px 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.edit-form { margin-top: 8px; padding-top: 9px; border-top: 1px solid var(--border); }
+.edit-form h3 { margin: 0 0 8px; color: var(--text-strong); font-size: 14px; }
+.scan-fields { padding-bottom: 10px; }
+.field-error { color: #ff9cae; font-size: 11px; line-height: 1.25; }
+.scan-fields [aria-invalid="true"] { border-color: #ff9cae; }
+.edit-error, .edit-status { margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+.edit-error { border: 1px solid rgb(255 156 174 / 35%); background: rgb(90 28 49 / 35%); color: #ffc4cf; }
+.edit-status { border: 1px solid rgb(155 217 178 / 28%); background: rgb(35 70 52 / 28%); color: var(--success); }
+.save-button { width: 100%; min-height: 46px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 9px; background: transparent; color: var(--accent); font-size: 14px; font-weight: 750; cursor: pointer; touch-action: manipulation; }
+.save-button:hover { background: rgb(213 164 244 / 9%); }
+
 @media (min-width: 700px) {
   .shell { padding-top: max(28px, env(safe-area-inset-top)); }
   .intro { margin-bottom: 18px; }
@@ -254,5 +338,6 @@ footer { margin-top: 14px; color: var(--text-subtle); font-size: 11px; text-alig
 }
 
 @media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }

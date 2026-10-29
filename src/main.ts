@@ -1,6 +1,7 @@
 import { createScanRecord, parseOCR } from "./ocr";
 import { findSpecies, SPECIES } from "./species";
 import { calculateScore, formatPoints } from "./scoring";
+import { submitManualEdits, type ManualEditErrors, type ManualScanEdits } from "./editing";
 import { newScanId } from "./data";
 import type { ScanRecord } from "./types";
 import "./style.css";
@@ -38,7 +39,7 @@ app.innerHTML = `
     </section>
 
     <section id="results-section" class="results-section" aria-labelledby="results-title">
-      <div class="results-heading">
+      <div id="results-heading" class="results-heading">
         <h2 id="results-title">Results <span id="result-count" class="count-pill">0</span></h2>
         <label id="add-more-button" class="secondary-button add-more-button" for="image-input" hidden>＋ Add photos</label>
       </div>
@@ -64,6 +65,7 @@ app.innerHTML = `
 const imageInput = app.querySelector<HTMLInputElement>("#image-input")!;
 const dropZone = app.querySelector<HTMLDivElement>("#drop-zone")!;
 const resultsList = app.querySelector<HTMLDivElement>("#results-list")!;
+const resultsHeading = app.querySelector<HTMLDivElement>("#results-heading")!;
 const emptyState = app.querySelector<HTMLDivElement>("#empty-state")!;
 const progressWrap = app.querySelector<HTMLDivElement>("#progress-wrap")!;
 const progressElement = app.querySelector<HTMLProgressElement>("#progress-bar")!;
@@ -104,25 +106,83 @@ app.querySelector<HTMLButtonElement>("#clear-button")!.addEventListener("click",
   renderResults();
 });
 
-function onFieldChange(event: Event): void {
+function onEditInput(event: Event): void {
   const target = event.target;
   if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
-  const card = target.closest<HTMLElement>("[data-scan-id]");
-  if (!card) return;
-  const record = records.find((item) => item.scanId === card.dataset.scanId);
-  if (!record) return;
-  updateRecordField(record, target.dataset.field ?? "", target.value);
-  const focusInfo = {
-    scanId: record.scanId,
-    field: target.dataset.field ?? "",
-    start: target instanceof HTMLInputElement ? target.selectionStart : null,
-    end: target instanceof HTMLInputElement ? target.selectionEnd : null,
-  };
-  renderResults(focusInfo);
+  const form = target.closest<HTMLFormElement>("form[data-edit-form]");
+  if (!form) return;
+
+  const fieldError = form.querySelector<HTMLElement>(`[data-error-for="${CSS.escape(target.name)}"]`);
+  if (fieldError) {
+    fieldError.textContent = "";
+    fieldError.hidden = true;
+    target.removeAttribute("aria-invalid");
+  }
+  if (!form.querySelector<HTMLElement>(".field-error:not([hidden])")) {
+    form.querySelector<HTMLElement>(".edit-error")!.hidden = true;
+  }
+  form.querySelector<HTMLElement>(".edit-status")!.hidden = true;
 }
 
-resultsList.addEventListener("input", onFieldChange);
-resultsList.addEventListener("change", onFieldChange);
+function valuesFromForm(form: HTMLFormElement): ManualScanEdits {
+  const values = new FormData(form);
+  return {
+    species: String(values.get("species") ?? ""),
+    cp: String(values.get("cp") ?? ""),
+    heightM: String(values.get("heightM") ?? ""),
+    weightKg: String(values.get("weightKg") ?? ""),
+    xxl: String(values.get("xxl") ?? ""),
+    attackIV: String(values.get("attackIV") ?? ""),
+    defenseIV: String(values.get("defenseIV") ?? ""),
+    hpIV: String(values.get("hpIV") ?? ""),
+  };
+}
+
+function showEditErrors(form: HTMLFormElement, errors: ManualEditErrors): void {
+  for (const input of form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[name]")) {
+    const message = errors[input.name as keyof ManualScanEdits] ?? "";
+    const error = form.querySelector<HTMLElement>(`[data-error-for="${CSS.escape(input.name)}"]`)!;
+    error.textContent = message;
+    error.hidden = !message;
+    if (message) input.setAttribute("aria-invalid", "true");
+    else input.removeAttribute("aria-invalid");
+  }
+  const summary = form.querySelector<HTMLElement>(".edit-error")!;
+  summary.textContent = "Check the highlighted fields. Your entries are still here.";
+  summary.hidden = false;
+  form.querySelector<HTMLInputElement | HTMLSelectElement>('[aria-invalid="true"]')?.focus();
+}
+
+resultsList.addEventListener("input", onEditInput);
+resultsList.addEventListener("change", onEditInput);
+resultsList.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || !form.matches("form[data-edit-form]")) return;
+  event.preventDefault();
+
+  const card = form.closest<HTMLElement>("[data-scan-id]");
+  const index = records.findIndex((record) => record.scanId === card?.dataset.scanId);
+  if (index < 0) return;
+
+  const result = submitManualEdits(records[index], valuesFromForm(form));
+  if (!result.ok) {
+    showEditErrors(form, result.errors);
+    return;
+  }
+
+  records[index] = result.record;
+  renderResults();
+  const savedCard = resultsList.querySelector<HTMLElement>(`[data-scan-id="${CSS.escape(result.record.scanId)}"]`);
+  savedCard?.querySelector<HTMLDetailsElement>("details.result-details")?.setAttribute("open", "");
+  const status = savedCard?.querySelector<HTMLElement>(".edit-status");
+  if (status) {
+    status.textContent = result.score.exact === null
+      ? "Saved. The score range has been updated."
+      : "Saved. Score and nickname updated.";
+    status.hidden = false;
+  }
+  savedCard?.querySelector<HTMLButtonElement>(".save-button")?.focus();
+});
 
 resultsList.addEventListener("click", async (event) => {
   const target = event.target;
@@ -189,43 +249,19 @@ async function processFiles(files: File[]): Promise<void> {
         ocrText: "",
       });
     }
-    renderResults();
   }
   isProcessing = false;
   progressValue = 100;
   progressLabel = `Scanned ${files.length} photo${files.length === 1 ? "" : "s"} · ${records.length - startCount} result${records.length - startCount === 1 ? "" : "s"} added`;
   renderProgress();
   renderResults();
-}
-
-function updateRecordField(record: ScanRecord, field: string, value: string): void {
-  if (field === "species") record.species = value.trim();
-  else if (field === "cp") record.cp = parseFieldNumber(value, 0, 99999);
-  else if (field === "heightM") record.heightM = parseFieldNumber(value, 0, 1000);
-  else if (field === "weightKg") record.weightKg = parseFieldNumber(value, 0, 100000);
-  else if (field === "xxl") record.xxl = value === "unknown" ? null : value === "yes";
-  else if (field.startsWith("iv-")) {
-    const stat = field.slice(3) as keyof ScanRecord["ivs"];
-    record.ivs[stat] = parseFieldNumber(value, 0, 15);
+  if (!resultsList.querySelector("form[data-edit-form]:focus-within")) {
+    requestAnimationFrame(() => {
+      if (resultsList.querySelector("form[data-edit-form]:focus-within")) return;
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      resultsHeading.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    });
   }
-  record.reviewReasons = reviewReasonsFor(record);
-}
-
-function parseFieldNumber(value: string, min: number, max: number): number | null {
-  if (!value.trim()) return null;
-  const parsed = Number(value.replace(",", "."));
-  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : null;
-}
-
-function reviewReasonsFor(record: ScanRecord): string[] {
-  const reasons: string[] = [];
-  if (!record.species) reasons.push("Choose a species.");
-  if (record.cp === null) reasons.push("Add the CP.");
-  if (record.heightM === null) reasons.push("Add the height.");
-  if (record.weightKg === null) reasons.push("Add the weight.");
-  if (record.xxl === null) reasons.push("Set XXL status.");
-  if (record.confidence < 55 && reasons.length === 0) reasons.push("Check the detected values.");
-  return reasons;
 }
 
 function nextUniqueScanId(reserved: ScanRecord[] = []): string {
@@ -249,27 +285,54 @@ function scoreSortValue(record: ScanRecord): number {
   return score.exact ?? score.low ?? Number.NEGATIVE_INFINITY;
 }
 
-function renderResults(restoreFocus?: { scanId: string; field: string; start: number | null; end: number | null }): void {
+function renderResults(): void {
   const sorted = sortRecords();
-  const openEditors = new Set(
-    Array.from(resultsList.querySelectorAll<HTMLDetailsElement>("details.edit-controls[open]"))
+  const openDetails = new Set(
+    Array.from(resultsList.querySelectorAll<HTMLDetailsElement>("details.result-details[open]"))
       .map((details) => details.closest<HTMLElement>("[data-scan-id]")?.dataset.scanId)
       .filter((scanId): scanId is string => Boolean(scanId)),
   );
+  const drafts = new Map<string, Record<string, string>>();
+  for (const form of resultsList.querySelectorAll<HTMLFormElement>("form[data-edit-form]")) {
+    const scanId = form.closest<HTMLElement>("[data-scan-id]")?.dataset.scanId;
+    if (scanId) drafts.set(scanId, Object.fromEntries(Array.from(new FormData(form).entries()).map(([key, entry]) => [key, String(entry)])));
+  }
+  const active = document.activeElement;
+  const focusedForm = active instanceof HTMLElement ? active.closest<HTMLFormElement>("form[data-edit-form]") : null;
+  const focusedScanId = focusedForm?.closest<HTMLElement>("[data-scan-id]")?.dataset.scanId;
+  const focusedField = focusedForm && focusedScanId
+    ? {
+      scanId: focusedScanId,
+      field: active instanceof HTMLInputElement || active instanceof HTMLSelectElement ? active.name : "",
+      saveButton: active instanceof HTMLButtonElement && active.matches(".save-button"),
+      start: active instanceof HTMLInputElement ? active.selectionStart : null,
+      end: active instanceof HTMLInputElement ? active.selectionEnd : null,
+    }
+    : null;
   emptyState.hidden = sorted.length > 0;
   app!.querySelector<HTMLSpanElement>("#result-count")!.textContent = String(records.length);
   app!.querySelector<HTMLButtonElement>("#clear-button")!.disabled = records.length === 0 || isProcessing;
   addMoreButton.hidden = records.length === 0 || isProcessing;
   resultsList.innerHTML = sorted.map((record, index) => renderCard(record, index)).join("");
   for (const card of resultsList.querySelectorAll<HTMLElement>("[data-scan-id]")) {
-    if (openEditors.has(card.dataset.scanId ?? "")) card.querySelector<HTMLDetailsElement>("details.edit-controls")!.open = true;
+    const scanId = card.dataset.scanId ?? "";
+    if (openDetails.has(scanId)) card.querySelector<HTMLDetailsElement>("details.result-details")!.open = true;
+    const draft = drafts.get(scanId);
+    if (draft) {
+      for (const [name, entry] of Object.entries(draft)) {
+        const field = card.querySelector<HTMLInputElement | HTMLSelectElement>(`[name="${CSS.escape(name)}"]`);
+        if (field) field.value = entry;
+      }
+    }
   }
-  if (restoreFocus) {
-    const selector = `[data-scan-id="${CSS.escape(restoreFocus.scanId)}"] [data-field="${CSS.escape(restoreFocus.field)}"]`;
+  if (focusedField?.saveButton) {
+    resultsList.querySelector<HTMLButtonElement>(`[data-scan-id="${CSS.escape(focusedField.scanId)}"] .save-button`)?.focus();
+  } else if (focusedField?.field) {
+    const selector = `[data-scan-id="${CSS.escape(focusedField.scanId)}"] [name="${CSS.escape(focusedField.field)}"]`;
     const input = resultsList.querySelector<HTMLInputElement | HTMLSelectElement>(selector);
     input?.focus();
-    if (input instanceof HTMLInputElement && restoreFocus.start !== null && restoreFocus.end !== null) {
-      try { input.setSelectionRange(restoreFocus.start, restoreFocus.end); } catch { /* number-like inputs may not support selections */ }
+    if (input instanceof HTMLInputElement && focusedField.start !== null && focusedField.end !== null) {
+      try { input.setSelectionRange(focusedField.start, focusedField.end); } catch { /* Selection is not supported for every input type. */ }
     }
   }
 }
@@ -278,59 +341,69 @@ function renderCard(record: ScanRecord, index: number): string {
   const species = findSpecies(record.species);
   const score = calculateScore(record, species);
   const exactReady = score.exact !== null;
-  const status = !species && record.species
-    ? "Not supported"
-    : record.reviewReasons.length
-      ? "Check details"
-      : score.exact === null
-        ? "Score range"
-        : "Estimate";
+  const status = !species && record.species ? "Not supported" : record.reviewReasons.length ? "Check details" : score.exact === null ? "Score range" : "Estimate";
   const displayedScore = score.exact !== null
     ? formatPoints(score.exact)
-    : score.low !== null && score.high !== null
-      ? `${Math.floor(score.low)}–${Math.ceil(score.high)}`
-      : "—";
+    : score.low !== null && score.high !== null ? `${Math.floor(score.low)}–${Math.ceil(score.high)}` : "—";
   const reviewText = record.reviewReasons.length ? `<ul class="review-list">${record.reviewReasons.map((reason) => `<li>${escapeHTML(reason)}</li>`).join("")}</ul>` : "";
   const nickname = score.exact === null ? "Add IVs to create nickname" : `${record.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;
   const sizeStatus = record.xxl === true ? "XXL" : record.xxl === false ? "Not XXL" : "Size unknown";
-  const unsupportedText = !species && record.species
-    ? `<p class="review-message">No size data for ${escapeHTML(record.species)}. Score unavailable.</p>`
+  const unsupportedText = !species && record.species ? `<p class="review-message">No size data for ${escapeHTML(record.species)}. Score unavailable.</p>` : "";
+  const breakdown = score.parts
+    ? `<div class="score-breakdown"><span>Height <b>${score.parts.height.toFixed(1)}</b></span><span>Weight <b>${score.parts.weight.toFixed(1)}</b></span><span>IVs <b>${score.parts.ivs.toFixed(1)}</b></span><span>XXL <b>${score.parts.xxl.toFixed(1)}</b></span></div>`
     : "";
   return `
     <article class="scan-card" data-scan-id="${escapeHTML(record.scanId)}">
-      <div class="card-topline">
-        <div class="scan-order">Scan ${index + 1}</div>
-        <span class="status-pill ${status === "Estimate" ? "is-ready" : status === "Not supported" ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span>
-      </div>
-      <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong></div>
-      <div class="pokemon-facts">
-        <span class="fact-chip">CP ${value(record.cp) || "—"}</span>
-        <span class="fact-chip ${record.xxl ? "fact-chip-xxl" : ""}">${sizeStatus}</span>
-      </div>
-      <div class="score-block">
-        <span class="score-label">Estimated Showcase score</span>
-        <strong>${displayedScore}</strong>
-        ${score.low !== null && score.high !== null ? `<small>Rounded size: ${Math.floor(score.low)}–${Math.ceil(score.high)}</small>` : `<small>Enter size details to estimate</small>`}
-      </div>
-      <div class="nickname-row"><span>Nickname</span><strong>${escapeHTML(nickname)}</strong></div>
-      <button class="copy-button" type="button" data-copy-scan="${escapeHTML(record.scanId)}" aria-label="${exactReady ? `Copy nickname ${escapeHTML(nickname)}` : "Enter all IVs to enable nickname copy"}" ${exactReady ? "" : "disabled"}>Copy</button>
-      ${unsupportedText}
-      ${reviewText}
-      <details class="edit-controls">
-        <summary>Edit details</summary>
-        <div class="scan-fields">
-          <label>Species<input type="text" list="supported-species" value="${escapeHTML(record.species)}" data-field="species" placeholder="Choose species" /></label>
-          <label>CP<input type="text" inputmode="numeric" value="${value(record.cp)}" data-field="cp" placeholder="—" /></label>
-          <label>Height (m)<input type="text" inputmode="decimal" value="${value(record.heightM)}" data-field="heightM" placeholder="—" /></label>
-          <label>Weight (kg)<input type="text" inputmode="decimal" value="${value(record.weightKg)}" data-field="weightKg" placeholder="—" /></label>
-          <label>XXL<select data-field="xxl"><option value="unknown" ${record.xxl === null ? "selected" : ""}>Unknown</option><option value="yes" ${record.xxl === true ? "selected" : ""}>Yes</option><option value="no" ${record.xxl === false ? "selected" : ""}>No</option></select></label>
-          <label>Attack IV<input type="text" inputmode="numeric" value="${value(record.ivs.attack)}" data-field="iv-attack" placeholder="?" /></label>
-          <label>Defence IV<input type="text" inputmode="numeric" value="${value(record.ivs.defense)}" data-field="iv-defense" placeholder="?" /></label>
-          <label>HP IV<input type="text" inputmode="numeric" value="${value(record.ivs.hp)}" data-field="iv-hp" placeholder="?" /></label>
+      <div class="card-topline"><span class="scan-order">Scan ${index + 1}</span><span class="status-pill ${status === "Estimate" ? "is-ready" : status === "Not supported" ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span></div>
+      <div class="compact-facts">
+        <div class="pokemon-summary">
+          <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong></div>
+          <div class="pokemon-facts"><span class="fact-chip">CP ${value(record.cp) || "—"}</span><span class="fact-chip ${record.xxl ? "fact-chip-xxl" : ""}">${sizeStatus}</span></div>
         </div>
-        <span class="scan-id">Scan ID ${escapeHTML(record.scanId.slice(0, 8))}</span>
+        <div class="score-block"><span class="score-label">Estimated score</span><strong>${displayedScore}</strong><small>${score.low !== null && score.high !== null ? `${score.exact === null ? "Range" : "Size range"} ${Math.floor(score.low)}–${Math.ceil(score.high)}` : "Enter size to estimate"}</small></div>
+      </div>
+      <div class="nickname-row"><div class="nickname-copy"><span>Nickname</span><strong>${escapeHTML(nickname)}</strong></div><button class="copy-button" type="button" data-copy-scan="${escapeHTML(record.scanId)}" aria-label="${exactReady ? `Copy nickname ${escapeHTML(nickname)}` : "Enter all IVs to enable nickname copy"}" ${exactReady ? "" : "disabled"}>Copy</button></div>
+      ${unsupportedText}
+      <details class="result-details">
+        <summary>Details</summary>
+        <div class="details-content">
+          ${breakdown}${reviewText}
+          <p class="technical-details">Height ${value(record.heightM)} m · Weight ${value(record.weightKg)} kg · IVs ${record.ivs.attack ?? "?"}/${record.ivs.defense ?? "?"}/${record.ivs.hp ?? "?"}</p>
+          <span class="scan-id">Scan ID ${escapeHTML(record.scanId.slice(0, 8))}</span>
+          <form class="edit-form" data-edit-form novalidate>
+            <h3>Correct scan</h3><p class="edit-error" role="alert" hidden></p><p class="edit-status" role="status" hidden></p>
+            <div class="scan-fields">
+              ${editField(record, "species", "Species", "Choose species", "supported-species")}
+              ${editField(record, "cp", "CP", "", undefined, "numeric")}
+              ${editField(record, "heightM", "Height (m)", "", undefined, "decimal")}
+              ${editField(record, "weightKg", "Weight (kg)", "", undefined, "decimal")}
+              <label>Size<select name="xxl" data-field="xxl"><option value="unknown" ${record.xxl === null ? "selected" : ""}>Unknown</option><option value="yes" ${record.xxl === true ? "selected" : ""}>XXL</option><option value="no" ${record.xxl === false ? "selected" : ""}>Not XXL</option></select><span class="field-error" data-error-for="xxl" hidden></span></label>
+              ${editField(record, "attackIV", "Attack IV", "Unknown", undefined, "numeric", record.ivs.attack)}
+              ${editField(record, "defenseIV", "Defence IV", "Unknown", undefined, "numeric", record.ivs.defense)}
+              ${editField(record, "hpIV", "HP IV", "Unknown", undefined, "numeric", record.ivs.hp)}
+            </div>
+            <button class="save-button" type="submit">Save changes</button>
+          </form>
+        </div>
       </details>
     </article>`;
+}
+
+function editField(
+  record: ScanRecord,
+  name: "species" | "cp" | "heightM" | "weightKg" | "attackIV" | "defenseIV" | "hpIV",
+  label: string,
+  placeholder: string,
+  list?: string,
+  inputmode?: "numeric" | "decimal",
+  editedValue?: number | null,
+): string {
+  const initialValue = name === "species" ? record.species
+    : name === "cp" ? value(record.cp)
+      : name === "heightM" ? value(record.heightM)
+        : name === "weightKg" ? value(record.weightKg)
+          : value(editedValue ?? (name === "attackIV" ? record.ivs.attack : name === "defenseIV" ? record.ivs.defense : record.ivs.hp));
+  return `<label>${label}<input type="text" name="${name}" data-field="${name}" value="${escapeHTML(initialValue)}" placeholder="${placeholder}" ${list ? `list="${list}"` : ""} ${inputmode ? `inputmode="${inputmode}"` : ""} /><span class="field-error" data-error-for="${name}" hidden></span></label>`;
 }
 
 function value(valueToShow: number | null): string {
