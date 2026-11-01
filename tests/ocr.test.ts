@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createWorker, PSM } from "tesseract.js";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { describe, expect, it } from "vitest";
-import { assembleScanRecord, OCR_CROPS, parseCPHint, parseOCR, recognizeOCRCrops } from "../src/ocr";
+import { assembleScanRecord, normalizeOCRCropText, OCR_CROPS, parseCPHint, parseOCR, recognizeOCRCrops } from "../src/ocr";
 import { readIVBars } from "../src/iv-bars";
 import { calculateScore } from "../src/scoring";
 import { findSpecies, recognizeSpecies } from "../src/species";
@@ -92,6 +92,34 @@ describe("OCR text extraction", () => {
     });
   });
 
+  it("parses one- through four-digit weights with varied precision and spacing", () => {
+    const cases = [
+      ["5kg", 5],
+      ["12.5kg", 12.5],
+      ["109.60 kg", 109.6],
+      ["1024.006kg", 1024.006],
+    ] as const;
+    for (const [weightText, expected] of cases) {
+      expect(parseOCR(`CP 1600 This Heatmor was caught Weight ${weightText} Height 2.29m XXL`).weightKg)
+        .toBe(expected);
+    }
+  });
+
+  it("keeps independently recognized fields when weight text is absent", () => {
+    expect(parseOCR("CP 1600 This Heatmor was caught Height 2.29m XXL")).toEqual({
+      species: "Heatmor",
+      cp: 1600,
+      heightM: 2.29,
+      weightKg: null,
+      xxl: true,
+    });
+  });
+
+  it("normalizes the isolated badge crop's observed XXL character confusion", () => {
+    expect(normalizeOCRCropText("xxlBadge", "LoL\n")).toBe("XXL");
+    expect(normalizeOCRCropText("size", "LoL\n")).toBe("LoL\n");
+  });
+
   it("recognizes the appraisal and catch screenshots without using appraisal assumptions", async () => {
     const tesseractCache = join(process.cwd(), "node_modules", ".cache", "tesseract");
     await mkdir(tesseractCache, { recursive: true });
@@ -101,6 +129,7 @@ describe("OCR text extraction", () => {
       { file: "bulbasaur-appraisal.jpg", cp: 434, weightKg: 11.55, heightM: 1.18, species: "Bulbasaur", ivs: { attack: 10, defense: 7, hp: 8 } },
       { file: "bulbasaur-no-appraisal.jpg", cp: 434, weightKg: 11.55, heightM: 1.18, species: "Bulbasaur", ivs: null },
       { file: "staryu-appraisal.jpg", cp: 479, weightKg: 56.36, heightM: 1.32, species: "Staryu", ivs: { attack: 12, defense: 15, hp: 12 } },
+      { file: "heatmor-appraisal.jpg", cp: 1600, weightKg: 109.6, heightM: 2.29, species: "Heatmor", ivs: { attack: 7, defense: 8, hp: 13 } },
     ];
     for (const sample of cases) {
       const worker = await createWorker("eng", 1, { cachePath: tesseractCache });
@@ -109,13 +138,15 @@ describe("OCR text extraction", () => {
       const image = await loadImage(imageBuffer);
       const texts: string[] = [];
       let cpHint: number | null = null;
+      let sizeCropText = "";
+      let xxlBadgeCropText = "";
       let barWords: Array<{ text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }> = [];
       try {
         await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
         for (const name of Object.keys(OCR_CROPS) as Array<keyof typeof OCR_CROPS>) {
           const crop = OCR_CROPS[name];
-          const scale = 3;
-          await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+          const scale = name === "xxlBadge" ? 6 : 3;
+          await worker.setParameters({ tessedit_pageseg_mode: name === "xxlBadge" ? PSM.SINGLE_WORD : PSM.SINGLE_BLOCK });
           const canvas = createCanvas(
             Math.round(image.width * crop.width * scale),
             Math.round(image.height * crop.height * scale),
@@ -143,7 +174,9 @@ describe("OCR text extraction", () => {
             alternate.width = 0;
             alternate.height = 0;
           }
-          texts.push(cropText);
+          texts.push(normalizeOCRCropText(name, cropText));
+          if (name === "size") sizeCropText = cropText;
+          if (name === "xxlBadge") xxlBadgeCropText = cropText;
           const words = (data.blocks ?? []).flatMap((block) => block.paragraphs
             .flatMap((paragraph) => paragraph.lines)
             .flatMap((line) => line.words).map((word) => ({
@@ -166,6 +199,10 @@ describe("OCR text extraction", () => {
       }
 
       const extracted = parseOCR(texts.join("\n"), cpHint);
+      if (sample.file === "heatmor-appraisal.jpg") {
+        console.info("Heatmor weight-region raw OCR:", JSON.stringify(sizeCropText));
+        console.info("Heatmor XXL-region raw OCR:", JSON.stringify(xxlBadgeCropText));
+      }
       expect(extracted, sample.file).toMatchObject({
         species: sample.species,
         cp: sample.cp,

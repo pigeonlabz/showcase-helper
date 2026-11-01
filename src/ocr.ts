@@ -20,6 +20,8 @@ export const OCR_CROPS = {
   catchInfo: { x: 0.02, y: 0.9, width: 0.96, height: 0.09 },
   speciesInfo: { x: 0.03, y: 0.6, width: 0.94, height: 0.19 },
   xxl: { x: 0.25, y: 0.37, width: 0.5, height: 0.14 },
+  // Recent card layouts place the size badge beside the height near the lower edge.
+  xxlBadge: { x: 0.775, y: 0.515, width: 0.1, height: 0.03 },
   bars: { x: 0.05, y: 0.73, width: 0.5, height: 0.2 },
 } as const;
 
@@ -60,9 +62,9 @@ export async function recognizeImage(
     return await recognizeOCRCrops(async (name, index) => {
       activeCropIndex = index;
       const crop = OCR_CROPS[name];
-      const scale = 3;
+      const scale = name === "xxlBadge" ? 6 : 3;
       try {
-        await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+        await worker.setParameters({ tessedit_pageseg_mode: name === "xxlBadge" ? PSM.SINGLE_WORD : PSM.SINGLE_BLOCK });
       } catch {
         // The crop can still be attempted with the worker's previous page segmentation mode.
       }
@@ -132,7 +134,7 @@ export async function recognizeOCRCrops(
   for (const [index, name] of cropNames.entries()) {
     try {
       const result = await readCrop(name, index);
-      texts.push(result.text);
+      texts.push(normalizeOCRCropText(name, result.text));
       words.push(...(result.words ?? []));
       if (name === "cp") cpHint = parseCPHint(result.text);
       if (name === "bars") ivLabels = result.words ?? [];
@@ -155,6 +157,11 @@ export function parseCPHint(text: string): number | null {
   const bareNumber = corrected.trim().match(/^(\d(?:\s*\d){1,4})\s*[|!.,]?$/)?.[1];
   const value = match ? Number(match[1].replace(/\s/g, "")) : bareNumber ? Number(bareNumber.replace(/\s/g, "")) : null;
   return value !== null && value > 0 && value < 10000 ? value : null;
+}
+
+/** Correct the consistent X→L/o confusion seen in the isolated XXL badge crop. */
+export function normalizeOCRCropText(name: OCRCropName, text: string): string {
+  return name === "xxlBadge" && /^\s*LoL\s*$/i.test(text) ? "XXL" : text;
 }
 
 function wordsFromBlocks(blocks: OCRBlock[]): OCRWord[] {
@@ -182,7 +189,7 @@ function cropAndScale(source: HTMLImageElement, x: number, y: number, width: num
 export function parseOCR(text: string, cpHint: number | null = null): Pick<ScanRecord, "species" | "cp" | "heightM" | "weightKg" | "xxl"> {
   const cleaned = text.replace(/\s+/g, " ");
   const cp = cleaned.match(/\bCP\s*[:#]?\s*(\d{1,5})\b/i)?.[1];
-  const weight = cleaned.match(/(?:WEIGHT\s*)?([0-9]{1,5}[.,][0-9]{1,3})\s*KG\b/i)?.[1];
+  const weight = cleaned.match(/\b(?:WEIGHT\s*)?(\d{1,4}(?:[.,]\d{1,3})?)\s*KG\b/i)?.[1];
   const height = cleaned.match(/(?:HEIGHT\s*)?([0-9]{1,4}[.,][0-9]{1,3})\s*M\b/i)?.[1];
   return {
     species: recognizeSpecies(cleaned),
