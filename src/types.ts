@@ -9,6 +9,8 @@ export type ScanRecord = {
   fileName: string;
   scannedAt: string;
   species: string;
+  /** Selected Game Master form row; null means a scoring-relevant form still needs selection. */
+  formId?: string | null;
   cp: number | null;
   heightM: number | null;
   weightKg: number | null;
@@ -27,6 +29,7 @@ export type OCRWord = {
 
 export type SpeciesData = {
   name: string;
+  formId: string;
   dex: number;
   meanHeightM: number;
   meanWeightKg: number;

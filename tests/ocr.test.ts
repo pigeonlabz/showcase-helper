@@ -4,11 +4,12 @@ import { fileURLToPath } from "node:url";
 import { createWorker, PSM } from "tesseract.js";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { describe, expect, it } from "vitest";
-import { assembleScanRecord, normalizeOCRCropText, OCR_CROPS, parseCPHint, parseOCR, recognizeOCRCrops } from "../src/ocr";
+import { assembleScanRecord, normalizeOCRCropText, OCR_CROPS, parseCPHint, parseOCR, recognizeOCRCrops, resolveCPHint } from "../src/ocr";
 import { readIVBars } from "../src/iv-bars";
 import { calculateScore } from "../src/scoring";
 import { findSpecies, recognizeSpecies } from "../src/species";
 import { POKEMON_SPECIES_NAMES } from "../src/pokemon-names";
+import { submitManualEdits } from "../src/editing";
 
 describe("OCR text extraction", () => {
   it("extracts the expected fields and species from appraisal catch text", () => {
@@ -39,6 +40,11 @@ describe("OCR text extraction", () => {
     });
 
     expect(result.failedCrops).toContain("cp");
+    expect(result.regions?.find((region) => region.name === "cp")).toMatchObject({ failed: true, text: "" });
+    expect(result.regions?.find((region) => region.name === "size")).toMatchObject({
+      rawText: "56.36kg 1.32m XXL",
+      failed: false,
+    });
     expect(parseOCR(result.text, result.cpHint)).toMatchObject({
       species: "Staryu",
       cp: null,
@@ -46,6 +52,52 @@ describe("OCR text extraction", () => {
       weightKg: 56.36,
       xxl: true,
     });
+  });
+
+  it("retains extracted fields, IVs, score, and nickname when CP OCR fails", async () => {
+    const ocr = await recognizeOCRCrops(async (name) => {
+      if (name === "cp") throw new Error("simulated CP OCR failure");
+      if (name === "size") return { text: "36.06kg 1.33m XXL" };
+      if (name === "catchInfo") return { text: "This Machop was caught on 10/06/2026" };
+      return { text: "" };
+    });
+    const record = assembleScanRecord(
+      { name: "machop-cp-hidden.jpg" },
+      "scan-machop-cp-hidden",
+      ocr,
+      () => ({ attack: 15, defense: 6, hp: 14 }),
+    );
+
+    expect(record).toMatchObject({
+      scanId: "scan-machop-cp-hidden",
+      species: "Machop",
+      cp: null,
+      heightM: 1.33,
+      weightKg: 36.06,
+      xxl: true,
+      ivs: { attack: 15, defense: 6, hp: 14 },
+    });
+    expect(record.reviewReasons.some((reason) => /CP/i.test(reason))).toBe(false);
+    const score = calculateScore(record, findSpecies(record.species));
+    expect(score.exact).not.toBeNull();
+
+    const edited = submitManualEdits(record, {
+      species: "Machop",
+      cp: "",
+      heightM: "1.33",
+      weightKg: "36.06",
+      xxl: "yes",
+      attackIV: "15",
+      defenseIV: "6",
+      hpIV: "14",
+    });
+    expect(edited.ok).toBe(true);
+    if (edited.ok) {
+      expect(edited.record.scanId).toBe(record.scanId);
+      expect(edited.record.cp).toBeNull();
+      expect(edited.score.exact).not.toBeNull();
+      expect(edited.nickname).not.toBeNull();
+    }
   });
 
   it("preserves OCR fields when IV pixel detection throws", () => {
@@ -81,6 +133,11 @@ describe("OCR text extraction", () => {
     expect(parseCPHint("crl63")).toBe(163);
     expect(parseCPHint("cr434")).toBe(434);
     expect(parseCPHint("479 |")).toBe(479);
+    expect(parseCPHint("P2240")).toBe(2240);
+    expect(resolveCPHint("CP 2206", "2206 |\n")).toBe(2206);
+    expect(resolveCPHint("CP 479", "CP 479\n")).toBe(479);
+    expect(resolveCPHint("CP 21 noisy", "2 RB\n")).toBeNull();
+    expect(resolveCPHint("«32g5 |", "325 |\n")).toBeNull();
   });
 
   it("accepts large displayed weights and heights without truncating digits", () => {
@@ -98,6 +155,7 @@ describe("OCR text extraction", () => {
       ["12.5kg", 12.5],
       ["109.60 kg", 109.6],
       ["1024.006kg", 1024.006],
+      ["101.91ke", 101.91],
     ] as const;
     for (const [weightText, expected] of cases) {
       expect(parseOCR(`CP 1600 This Heatmor was caught Weight ${weightText} Height 2.29m XXL`).weightKg)
@@ -112,6 +170,13 @@ describe("OCR text extraction", () => {
       heightM: 2.29,
       weightKg: null,
       xxl: true,
+    });
+  });
+
+  it("parses an integer height displayed without decimal places", () => {
+    expect(parseOCR("This Infernape was caught 97.89kg 2m XXL")).toMatchObject({
+      heightM: 2,
+      weightKg: 97.89,
     });
   });
 

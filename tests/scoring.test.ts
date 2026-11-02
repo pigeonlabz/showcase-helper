@@ -6,6 +6,7 @@ describe("single-species Biggest Showcase scoring", () => {
   it("matches the published Squirtle worked example", () => {
     const squirtle = {
       name: "Squirtle",
+      formId: "SQUIRTLE",
       dex: 7,
       meanHeightM: 0.5,
       meanWeightKg: 9,

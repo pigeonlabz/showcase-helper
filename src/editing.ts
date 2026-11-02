@@ -1,5 +1,11 @@
 import { calculateScore, formatPoints } from "./scoring";
-import { findSpecies } from "./species";
+import {
+  findSpecies,
+  getBaseSpeciesName,
+  getExplicitSpeciesForm,
+  getScoringFormOptions,
+  resolveSpeciesForScoring,
+} from "./species";
 import type { ScanRecord } from "./types";
 
 export type ManualScanEdits = {
@@ -38,19 +44,30 @@ export function submitManualEdits(record: ScanRecord, values: ManualScanEdits): 
 
   if (Object.keys(errors).length) return { ok: false, errors };
 
-  const speciesData = findSpecies(speciesName);
-  const normalizedSpecies = speciesData?.name ?? speciesName;
+  const explicitlyNamedForm = getExplicitSpeciesForm(speciesName);
+  const speciesData = explicitlyNamedForm ?? findSpecies(speciesName);
+  const normalizedSpecies = speciesData ? getBaseSpeciesName(speciesName) ?? speciesData.name : speciesName;
+  const formOptions = getScoringFormOptions(normalizedSpecies);
+  const previousFormStillApplies = getBaseSpeciesName(record.species) === normalizedSpecies
+    && formOptions.some((option) => option.formId === record.formId);
+  const formId = explicitlyNamedForm?.formId ?? (previousFormStillApplies ? record.formId : null);
+  const scoringSpecies = resolveSpeciesForScoring(normalizedSpecies, formId);
   const updatedRecord: ScanRecord = {
     ...record,
     species: normalizedSpecies,
+    formId,
     cp,
     heightM: heightM!,
     weightKg: weightKg!,
     xxl: xxl === "unknown" ? null : xxl === "yes",
     ivs: { attack, defense, hp },
-    reviewReasons: speciesData ? [] : [`Scoring data unavailable for ${normalizedSpecies}.`],
+    reviewReasons: scoringSpecies
+      ? []
+      : formOptions.length
+        ? [`Choose the correct form for ${normalizedSpecies} before scoring.`]
+        : [`Scoring data unavailable for ${normalizedSpecies}.`],
   };
-  const score = calculateScore(updatedRecord, speciesData);
+  const score = calculateScore(updatedRecord, scoringSpecies);
   const nickname = score.exact === null
     ? null
     : `${updatedRecord.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;

@@ -1,5 +1,5 @@
 import { createScanRecord, parseOCR } from "./ocr";
-import { findSpecies } from "./species";
+import { getScoringFormOptions, resolveSpeciesForScoring } from "./species";
 import { POKEMON_SPECIES_NAMES } from "./pokemon-names";
 import { calculateScore, formatPoints } from "./scoring";
 import { submitManualEdits, type ManualEditErrors, type ManualScanEdits } from "./editing";
@@ -156,6 +156,19 @@ function showEditErrors(form: HTMLFormElement, errors: ManualEditErrors): void {
 
 resultsList.addEventListener("input", onEditInput);
 resultsList.addEventListener("change", onEditInput);
+resultsList.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement) || !target.matches("select[data-form-select]")) return;
+  const card = target.closest<HTMLElement>("[data-scan-id]");
+  const record = records.find((item) => item.scanId === card?.dataset.scanId);
+  if (!record) return;
+
+  const options = getScoringFormOptions(record.species);
+  if (target.value && !options.some((option) => option.formId === target.value)) return;
+  record.formId = target.value || null;
+  renderResults();
+  resultsList.querySelector<HTMLSelectElement>(`[data-scan-id="${CSS.escape(record.scanId)}"] select[data-form-select]`)?.focus();
+});
 resultsList.addEventListener("submit", (event) => {
   const form = event.target;
   if (!(form instanceof HTMLFormElement) || !form.matches("form[data-edit-form]")) return;
@@ -190,7 +203,7 @@ resultsList.addEventListener("click", async (event) => {
   if (!(target instanceof HTMLButtonElement) || !target.matches("[data-copy-scan]")) return;
   const record = records.find((item) => item.scanId === target.dataset.copyScan);
   if (!record) return;
-  const score = calculateScore(record, findSpecies(record.species));
+  const score = calculateScore(record, resolveSpeciesForScoring(record.species, record.formId));
   if (score.exact === null) return;
   const label = record.xxl ? "XXL" : "GO";
   const nickname = `${label} ${formatPoints(score.exact)}`;
@@ -282,7 +295,7 @@ function sortRecords(): ScanRecord[] {
 }
 
 function scoreSortValue(record: ScanRecord): number {
-  const score = calculateScore(record, findSpecies(record.species));
+  const score = calculateScore(record, resolveSpeciesForScoring(record.species, record.formId));
   return score.exact ?? score.low ?? Number.NEGATIVE_INFINITY;
 }
 
@@ -339,22 +352,26 @@ function renderResults(): void {
 }
 
 function renderCard(record: ScanRecord, index: number): string {
-  const species = findSpecies(record.species);
+  const formOptions = getScoringFormOptions(record.species);
+  const species = resolveSpeciesForScoring(record.species, record.formId);
   const score = calculateScore(record, species);
   const exactReady = score.exact !== null;
-  const unsupportedScoring = Boolean(record.species && !species);
-  const status = unsupportedScoring ? "Scoring unavailable" : !record.species ? "Choose species" : record.reviewReasons.length ? "Check details" : score.exact === null ? "Score range" : "Estimate";
+  const needsForm = formOptions.length > 0 && !species;
+  const unsupportedScoring = Boolean(record.species && !species && !needsForm);
+  const status = needsForm ? "Select form" : unsupportedScoring ? "Scoring unavailable" : !record.species ? "Choose species" : record.reviewReasons.length ? "Check details" : score.exact === null ? "Score range" : "Estimate";
   const displayedScore = score.exact !== null
     ? formatPoints(score.exact)
     : score.low !== null && score.high !== null ? `${Math.floor(score.low)}–${Math.ceil(score.high)}` : unsupportedScoring ? "N/A" : "—";
   const scoreCaption = unsupportedScoring
     ? "No verified size data"
+    : needsForm
+      ? "Select form to score"
     : score.low !== null && score.high !== null
       ? `${score.exact === null ? "Range" : "Size range"} ${Math.floor(score.low)}–${Math.ceil(score.high)}`
       : "Enter height and weight";
   const reviewText = record.reviewReasons.length ? `<ul class="review-list">${record.reviewReasons.map((reason) => `<li>${escapeHTML(reason)}</li>`).join("")}</ul>` : "";
   const nickname = score.exact === null
-    ? unsupportedScoring ? "Scoring data unavailable" : "Complete IVs and size for nickname"
+    ? needsForm ? "Select form to score" : unsupportedScoring ? "Scoring data unavailable" : "Complete IVs and size for nickname"
     : `${record.xxl ? "XXL" : "GO"} ${formatPoints(score.exact)}`;
   const sizeStatus = record.xxl === true ? "XXL" : record.xxl === false ? "Not XXL" : "Size unknown";
   const unsupportedText = unsupportedScoring ? `<p class="review-message">Scoring data unavailable for ${escapeHTML(record.species)}. Extracted values are retained.</p>` : "";
@@ -366,7 +383,7 @@ function renderCard(record: ScanRecord, index: number): string {
       <div class="card-topline"><span class="scan-order">Scan ${index + 1}</span><span class="status-pill ${status === "Estimate" ? "is-ready" : unsupportedScoring ? "is-unsupported" : "is-review"}">${escapeHTML(status)}</span></div>
       <div class="compact-facts">
         <div class="pokemon-summary">
-          <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong></div>
+          <div class="pokemon-title"><strong>${escapeHTML(record.species || "Unknown species")}</strong>${renderFormChoice(record, formOptions)}</div>
           <div class="pokemon-facts"><span class="fact-chip">CP ${value(record.cp) || "—"}</span><span class="fact-chip ${record.xxl ? "fact-chip-xxl" : ""}">${sizeStatus}</span></div>
         </div>
         <div class="score-block"><span class="score-label">Estimated score</span><strong>${displayedScore}</strong><small>${scoreCaption}</small></div>
@@ -396,6 +413,15 @@ function renderCard(record: ScanRecord, index: number): string {
         </div>
       </details>
     </article>`;
+}
+
+function renderFormChoice(
+  record: ScanRecord,
+  options: ReturnType<typeof getScoringFormOptions>,
+): string {
+  if (options.length < 2) return "";
+  const selectedFormId = options.some((option) => option.formId === record.formId) ? record.formId : "";
+  return `<label class="species-form-choice"><span>Form</span><select data-form-select aria-label="Scoring form for ${escapeHTML(record.species)}"><option value="" ${selectedFormId ? "" : "selected"}>Select form</option>${options.map((option) => `<option value="${escapeHTML(option.formId)}" ${option.formId === selectedFormId ? "selected" : ""}>${escapeHTML(option.label)}</option>`).join("")}</select></label>`;
 }
 
 function editField(

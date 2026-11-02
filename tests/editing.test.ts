@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { submitManualEdits, type ManualScanEdits } from "../src/editing";
 import { calculateScore, formatPoints } from "../src/scoring";
-import { findSpecies } from "../src/species";
+import { findSpecies, resolveSpeciesForScoring } from "../src/species";
 import type { ScanRecord } from "../src/types";
 
 const sample: ScanRecord = {
@@ -53,6 +53,45 @@ describe("manual scan edits", () => {
     expect(result.record.cp).toBeNull();
     expect(result.score.exact).not.toBeNull();
     expect(result.nickname).not.toBeNull();
+  });
+
+  it("preserves a selected regional form, scan ID, and measurements through manual correction", () => {
+    const farfetchd: ScanRecord = {
+      ...sample,
+      scanId: "scan-farfetchd-galarian",
+      species: "Farfetch'd",
+      formId: "FARFETCHD_GALARIAN",
+      cp: 692,
+      heightM: 1.31,
+      weightKg: 79.22,
+      ivs: { attack: 0, defense: 3, hp: 6 },
+    };
+    const result = submitManualEdits(farfetchd, {
+      ...corrected,
+      species: "Farfetch'd",
+      cp: "692",
+      heightM: "1.31",
+      weightKg: "79.22",
+      xxl: "yes",
+      attackIV: "0",
+      defenseIV: "3",
+      hpIV: "6",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.record).toMatchObject({
+      scanId: farfetchd.scanId,
+      species: "Farfetch'd",
+      formId: "FARFETCHD_GALARIAN",
+      cp: 692,
+      heightM: 1.31,
+      weightKg: 79.22,
+      ivs: { attack: 0, defense: 3, hp: 6 },
+    });
+    expect(result.score.exact).toBeCloseTo(1062.366240805, 7);
+    expect(result.nickname).toBe("XXL 1062");
+    expect(resolveSpeciesForScoring(result.record.species, result.record.formId)?.meanWeightKg).toBe(42);
   });
 
   it("returns actionable errors without changing the scan when values are invalid", () => {

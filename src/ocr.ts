@@ -1,6 +1,6 @@
 import { createWorker, PSM } from "tesseract.js";
 import type { OCRWord, ScanRecord } from "./types";
-import { recognizeSpecies } from "./species";
+import { getExplicitSpeciesForm, recognizeSpecies } from "./species";
 import { readIVBars } from "./iv-bars";
 
 export type OCRResult = {
@@ -10,9 +10,17 @@ export type OCRResult = {
   ivLabels: OCRWord[];
   cpHint: number | null;
   failedCrops: OCRCropName[];
+  regions?: OCRRegionDiagnostic[];
 };
 
-export type OCRCropRead = { text: string; words?: OCRWord[] };
+export type OCRCropRead = { text: string; words?: OCRWord[]; attempts?: string[]; cpHint?: number | null };
+export type OCRRegionDiagnostic = {
+  name: OCRCropName;
+  rawText: string;
+  text: string;
+  attempts: string[];
+  failed: boolean;
+};
 
 export const OCR_CROPS = {
   cp: { x: 0.27, y: 0.035, width: 0.46, height: 0.09 },
@@ -24,6 +32,8 @@ export const OCR_CROPS = {
   xxlBadge: { x: 0.775, y: 0.515, width: 0.1, height: 0.03 },
   bars: { x: 0.05, y: 0.73, width: 0.5, height: 0.2 },
 } as const;
+
+export const OCR_SIZE_RETRY = { x: 0.05, y: 0.53, width: 0.9, height: 0.12, scale: 6 } as const;
 
 export type OCRCropName = keyof typeof OCR_CROPS;
 
@@ -79,21 +89,64 @@ export async function recognizeImage(
       try {
         const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
         let text = result.data.text;
-        if (name === "cp" && parseCPHint(text) === null) {
-          try {
-            await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
-            const alternateCanvas = cropAndScale(source, width * crop.x, height * crop.y, width * crop.width, height * crop.height, 4);
+        const attempts = [text];
+        let cpHint: number | null | undefined;
+        if (name === "cp") {
+          const firstText = text;
+          const firstHint = parseCPHint(firstText);
+          if (firstHint !== null && hasCPLabel(firstText) && firstHint >= 1000) {
+            cpHint = firstHint;
+            text = `CP ${firstHint}`;
+          } else {
             try {
-              const alternate = await worker.recognize(alternateCanvas, {}, { text: true });
-              if (parseCPHint(alternate.data.text) !== null) text = alternate.data.text;
+              await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+              const alternateCanvas = cropAndScale(source, width * crop.x, height * crop.y, width * crop.width, height * crop.height, 4);
+              try {
+                const alternate = await worker.recognize(alternateCanvas, {}, { text: true });
+                attempts.push(alternate.data.text);
+                cpHint = resolveCPHint(firstText, alternate.data.text);
+                text = cpHint === null ? "" : `CP ${cpHint}`;
+              } finally {
+                alternateCanvas.width = 0;
+                alternateCanvas.height = 0;
+              }
+            } catch {
+              // Leave CP unknown if the corroborating pass cannot complete.
+              cpHint = null;
+              text = "";
             } finally {
-              alternateCanvas.width = 0;
-              alternateCanvas.height = 0;
+              try { await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK }); } catch { /* Keep the worker usable. */ }
             }
-          } catch {
-            // Keep the first crop text and leave CP unknown if the alternate pass fails.
-          } finally {
-            try { await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK }); } catch { /* Keep the worker usable. */ }
+          }
+        } else if (name === "size") {
+          const firstFields = parseOCR(text);
+          if (firstFields.weightKg === null || firstFields.heightM === null) {
+            try {
+              await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+              const alternateCanvas = cropAndScale(
+                source,
+                width * OCR_SIZE_RETRY.x,
+                height * OCR_SIZE_RETRY.y,
+                width * OCR_SIZE_RETRY.width,
+                height * OCR_SIZE_RETRY.height,
+                OCR_SIZE_RETRY.scale,
+              );
+              try {
+                const alternate = await worker.recognize(alternateCanvas, {}, { text: true });
+                attempts.push(alternate.data.text);
+                const alternateFields = parseOCR(alternate.data.text);
+                const recoveredWeight = firstFields.weightKg === null && alternateFields.weightKg !== null;
+                const recoveredHeight = firstFields.heightM === null && alternateFields.heightM !== null;
+                if (recoveredWeight || recoveredHeight) text = `${text}\n${alternate.data.text}`;
+              } finally {
+                alternateCanvas.width = 0;
+                alternateCanvas.height = 0;
+              }
+            } catch {
+              // Keep all values from the first measurement crop if the alternate pass fails.
+            } finally {
+              try { await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK }); } catch { /* Keep the worker usable. */ }
+            }
           }
         }
         const regionWords = wordsFromBlocks(result.data.blocks ?? []).map((word) => ({
@@ -105,7 +158,7 @@ export async function recognizeImage(
           y1: word.bbox.y1 / scale + height * crop.y,
           },
         }));
-        return { text, words: regionWords };
+        return { text, words: regionWords, attempts, ...(name === "cp" ? { cpHint } : {}) };
       } finally {
         canvas.width = 0;
         canvas.height = 0;
@@ -129,17 +182,27 @@ export async function recognizeOCRCrops(
   const texts: string[] = [];
   const words: OCRWord[] = [];
   const failedCrops: OCRCropName[] = [];
+  const regions: OCRRegionDiagnostic[] = [];
   let cpHint: number | null = null;
   let ivLabels: OCRWord[] = [];
   for (const [index, name] of cropNames.entries()) {
     try {
       const result = await readCrop(name, index);
-      texts.push(normalizeOCRCropText(name, result.text));
+      const normalizedText = normalizeOCRCropText(name, result.text);
+      texts.push(normalizedText);
+      regions.push({
+        name,
+        rawText: result.attempts?.[0] ?? result.text,
+        text: normalizedText,
+        attempts: result.attempts ?? [result.text],
+        failed: false,
+      });
       words.push(...(result.words ?? []));
-      if (name === "cp") cpHint = parseCPHint(result.text);
+      if (name === "cp") cpHint = result.cpHint === undefined ? parseCPHint(result.text) : result.cpHint;
       if (name === "bars") ivLabels = result.words ?? [];
     } catch {
       failedCrops.push(name);
+      regions.push({ name, rawText: "", text: "", attempts: [], failed: true });
     } finally {
       logger?.((index + 1) / cropNames.length);
     }
@@ -148,15 +211,26 @@ export async function recognizeOCRCrops(
   const confidence = usefulWords.length
     ? usefulWords.reduce((sum, word) => sum + word.confidence, 0) / usefulWords.length
     : 0;
-  return { text: texts.join("\n"), confidence, words, ivLabels, cpHint, failedCrops };
+  return { text: texts.join("\n"), confidence, words, ivLabels, cpHint, failedCrops, regions };
 }
 
 export function parseCPHint(text: string): number | null {
   const corrected = text.replace(/([A-Z])[Il|](?=\d)/gi, (_match, prefix: string) => `${prefix}1`);
-  const match = corrected.match(/(?:CP|CR)[^0-9]{0,3}((?:\d\s*){2,5})\b/i);
+  const match = corrected.match(/(?:CP|CR|P)[^0-9]{0,3}((?:\d\s*){2,5})\b/i);
   const bareNumber = corrected.trim().match(/^(\d(?:\s*\d){1,4})\s*[|!.,]?$/)?.[1];
   const value = match ? Number(match[1].replace(/\s/g, "")) : bareNumber ? Number(bareNumber.replace(/\s/g, "")) : null;
   return value !== null && value > 0 && value < 10000 ? value : null;
+}
+
+export function resolveCPHint(firstText: string, alternateText: string): number | null {
+  const first = parseCPHint(firstText);
+  const alternate = parseCPHint(alternateText);
+  if (first === null || first !== alternate) return null;
+  return first >= 1000 || (hasCPLabel(firstText) && hasCPLabel(alternateText)) ? first : null;
+}
+
+function hasCPLabel(text: string): boolean {
+  return /(?:CP|CR)[^0-9]{0,3}\d/i.test(text);
 }
 
 /** Correct the consistent X→L/o confusion seen in the isolated XXL badge crop. */
@@ -189,8 +263,8 @@ function cropAndScale(source: HTMLImageElement, x: number, y: number, width: num
 export function parseOCR(text: string, cpHint: number | null = null): Pick<ScanRecord, "species" | "cp" | "heightM" | "weightKg" | "xxl"> {
   const cleaned = text.replace(/\s+/g, " ");
   const cp = cleaned.match(/\bCP\s*[:#]?\s*(\d{1,5})\b/i)?.[1];
-  const weight = cleaned.match(/\b(?:WEIGHT\s*)?(\d{1,4}(?:[.,]\d{1,3})?)\s*KG\b/i)?.[1];
-  const height = cleaned.match(/(?:HEIGHT\s*)?([0-9]{1,4}[.,][0-9]{1,3})\s*M\b/i)?.[1];
+  const weight = cleaned.match(/\b(?:WEIGHT\s*)?(\d{1,4}(?:[.,]\d{1,3})?)\s*K[GE]\b/i)?.[1];
+  const height = cleaned.match(/(?:HEIGHT\s*)?(\d{1,4}(?:[.,]\d{1,3})?)\s*M\b/i)?.[1];
   return {
     species: recognizeSpecies(cleaned),
     cp: cpHint ?? (cp ? Number(cp) : null),
@@ -241,6 +315,7 @@ export function assembleScanRecord(
   scannedAt = new Date().toISOString(),
 ): ScanRecord {
   const extracted = parseOCR(ocr.text, ocr.cpHint);
+  const formId = getExplicitSpeciesForm(extracted.species)?.formId ?? null;
   let foundIVs: ReturnType<typeof readIVBars> = null;
   let ivFailure = false;
   try {
@@ -249,9 +324,21 @@ export function assembleScanRecord(
     ivFailure = true;
   }
 
+  const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV;
+  if (isDevelopment && typeof window !== "undefined") {
+    console.debug("Showcase Helper OCR diagnostics", {
+      scanId: id,
+      regions: (ocr.regions ?? []).map((region) => ({
+        ...region,
+        parsed: parsedValuesForRegion(region.name, region.text, ocr.cpHint, foundIVs),
+      })),
+      parsed: { ...extracted, ivs: foundIVs },
+      failedCrops: ocr.failedCrops,
+    });
+  }
+
   const reviewReasons: string[] = [];
   if (!extracted.species) reviewReasons.push("Species was not read; choose it manually.");
-  if (extracted.cp === null) reviewReasons.push("CP was not read (optional; not used for scoring).");
   if (extracted.heightM === null) reviewReasons.push("Height was not read; enter it manually.");
   if (extracted.weightKg === null) reviewReasons.push("Weight was not read; enter it manually.");
   if (extracted.xxl === null) reviewReasons.push("XXL status was not clear; choose it manually.");
@@ -266,11 +353,29 @@ export function assembleScanRecord(
     fileName: file.name,
     scannedAt,
     ...extracted,
+    formId,
     ivs: foundIVs ?? { attack: null, defense: null, hp: null },
     confidence: Math.round(ocr.confidence),
     reviewReasons,
     ocrText: ocr.text,
   };
+}
+
+function parsedValuesForRegion(
+  name: OCRCropName,
+  text: string,
+  cpHint: number | null,
+  ivs: ReturnType<typeof readIVBars>,
+): Record<string, unknown> {
+  if (name === "cp") return { cp: parseOCR(text, cpHint).cp };
+  if (name === "size") {
+    const parsed = parseOCR(text);
+    return { heightM: parsed.heightM, weightKg: parsed.weightKg };
+  }
+  if (name === "catchInfo") return { species: recognizeSpecies(text) };
+  if (name === "xxl" || name === "xxlBadge") return { xxl: /\bXXL\b/i.test(text) ? true : null };
+  if (name === "bars") return { ivs };
+  return {};
 }
 
 function emptyOCRResult(): OCRResult {
